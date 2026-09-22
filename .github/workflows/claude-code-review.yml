@@ -43,7 +43,16 @@ name: Claude Code Review
 # and the action's secret scrubbing is documented as best-effort. The tool
 # allowlist is not a boundary against that: the hook does not go through it.
 #
-# Instead the checkout takes the PR head only for an in-repo branch, and the
+# This is not a workaround: it is what the action's own `docs/security.md`
+# tells you to do. The action performs no checkout of its own and runs in
+# whatever the workflow left in the workspace, and for `pull_request_target`
+# that document says "do not check out an untrusted ref into the workspace
+# root before this action", recommending the base ref instead. It also
+# describes the alternative, if a future change ever needs the fork's files
+# themselves: check out the base ref at the workspace root and put the PR
+# head in a subdirectory passed via `--add-dir`.
+#
+# So the checkout takes the PR head only for an in-repo branch, and the
 # *base* commit for a fork. The fork's code is never fetched, so there is
 # nothing in the tree for it to plant. The reviewer gets the change from
 # `gh pr diff`, which needs no checkout, and uses the tree for the
