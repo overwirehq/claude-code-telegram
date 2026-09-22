@@ -217,7 +217,7 @@ class TestStopButtonOnProgress:
             mock_hb.return_value = mock_task
 
             with patch(
-                "src.bot.handlers.message._update_working_directory_from_claude_response"
+                "src.bot.orchestrator._update_working_directory_from_claude_response"
             ):
                 with patch("src.bot.utils.formatting.ResponseFormatter") as MockFmt:
                     MockFmt.return_value.format_claude_response.return_value = []
@@ -279,7 +279,7 @@ class TestStopButtonOnProgress:
             mock_task.cancel = MagicMock()
             mock_hb.return_value = mock_task
             with patch(
-                "src.bot.handlers.message._update_working_directory_from_claude_response"
+                "src.bot.orchestrator._update_working_directory_from_claude_response"
             ):
                 with patch("src.bot.utils.formatting.ResponseFormatter") as MockFmt:
                     MockFmt.return_value.format_claude_response.return_value = []
@@ -324,7 +324,7 @@ class TestStopButtonOnProgress:
             mock_task.cancel = MagicMock()
             mock_hb.return_value = mock_task
             with patch(
-                "src.bot.handlers.message._format_error_message", return_value="err"
+                "src.bot.orchestrator._format_error_message", return_value="err"
             ):
                 await orchestrator.agentic_text(update, context)
 
