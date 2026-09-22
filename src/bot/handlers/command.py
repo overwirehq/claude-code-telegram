@@ -4,9 +4,10 @@ import os
 import signal
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import structlog
+from claude_agent_sdk import EffortLevel
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -16,6 +17,7 @@ from ...projects import PrivateTopicsUnavailableError, load_project_registry
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
 from ...storage.models import SessionModel
+from ..utils.effort import EFFORT_LEVELS, get_effort, set_effort
 from ..utils.html_format import escape_html
 
 logger = structlog.get_logger()
@@ -121,6 +123,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"• <code>/cd &lt;dir&gt;</code> - Change directory\n"
         f"• <code>/projects</code> - Show available projects\n"
         f"• <code>/status</code> - Show session status\n"
+        f"• <code>/effort [level]</code> - Show or set reasoning effort\n"
         f"• <code>/actions</code> - Show quick actions\n"
         f"• <code>/git</code> - Git repository commands\n\n"
         f"<b>Quick Start:</b>\n"
@@ -172,6 +175,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• <code>/continue [message]</code> - Explicitly continue last session\n"
         "• <code>/end</code> - End current session and clear context\n"
         "• <code>/status</code> - Show session and usage status\n"
+        "• <code>/effort [level]</code> - Show or set reasoning effort\n"
         "• <code>/export</code> - Export session history\n"
         "• <code>/actions</code> - Show context-aware quick actions\n"
         "• <code>/git</code> - Git repository information\n\n"
@@ -203,6 +207,52 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
     await update.message.reply_text(help_text, parse_mode="HTML")
+
+
+async def effort_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show or set the SDK effort override for the current conversation."""
+    args = list(context.args or [])
+    current = get_effort(context)
+
+    if not args:
+        value = current or "SDK default"
+        await update.message.reply_text(
+            f"⚙️ <b>Claude Effort</b>: <code>{value}</code>\n\n"
+            "Usage: <code>/effort low|medium|high|xhigh|max|default</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    requested = args[0].lower()
+    valid_values = (*EFFORT_LEVELS, "default")
+    if len(args) != 1 or requested not in valid_values:
+        await update.message.reply_text(
+            "❌ <b>Invalid effort level</b>\n\n"
+            "Usage: <code>/effort low|medium|high|xhigh|max|default</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if requested == "default":
+        set_effort(context, None)
+        display = "SDK default"
+    else:
+        set_effort(context, cast(EffortLevel, requested))
+        display = requested
+
+    await update.message.reply_text(
+        f"✅ Claude effort set to <code>{display}</code> for this conversation.",
+        parse_mode="HTML",
+    )
+
+    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    if audit_logger:
+        await audit_logger.log_command(
+            user_id=update.effective_user.id,
+            command="effort",
+            args=args,
+            success=True,
+        )
 
 
 async def sync_threads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -401,6 +451,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=claude_session_id,
+                effort=get_effort(context),
             )
         else:
             # No session in context, try to find the most recent session
@@ -415,6 +466,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 user_id=user_id,
                 working_directory=current_dir,
                 prompt=prompt or default_prompt,
+                effort=get_effort(context),
             )
 
         if claude_response:
@@ -910,6 +962,7 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "",
         f"📂 Directory: <code>{relative_path}/</code>",
         f"🤖 Claude Session: {'✅ Active' if claude_session_id else '❌ None'}",
+        f"⚙️ Effort: <code>{get_effort(context) or 'default'}</code>",
         usage_info.rstrip(),
         f"🕐 Last Update: {update.message.date.strftime('%H:%M:%S UTC')}",
     ]

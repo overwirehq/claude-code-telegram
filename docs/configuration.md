@@ -129,8 +129,8 @@ AUDIT_LOG_RETENTION_DAYS=365     # Days to keep audit logs
 
 ```bash
 # Agentic mode (default: true)
-# true = conversational mode with 3 commands (/start, /new, /status)
-# false = classic terminal mode with 13 commands and inline keyboards
+# true = conversational mode with a compact command set
+# false = classic terminal mode with navigation and inline keyboards
 AGENTIC_MODE=true
 ```
 

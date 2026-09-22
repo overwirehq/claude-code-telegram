@@ -12,6 +12,7 @@ from ...claude.sdk_integration import ClaudeResponse
 from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
+from ..utils.effort import get_effort
 from ..utils.formatting import format_stop_reason
 from ..utils.html_format import escape_html, markdown_to_telegram_html
 
@@ -626,6 +627,7 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=claude_session_id,
+                effort=get_effort(context),
             )
         else:
             # No session in context, try to find the most recent session
@@ -639,6 +641,7 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
                 user_id=user_id,
                 working_directory=current_dir,
                 prompt=None,  # No prompt = use --continue
+                effort=get_effort(context),
             )
 
         if claude_response:
@@ -990,7 +993,10 @@ async def handle_quick_action_callback(
 
         # Run the action through Claude
         claude_response = await claude_integration.run_command(
-            prompt=action.prompt, working_directory=current_dir, user_id=user_id
+            prompt=action.prompt,
+            working_directory=current_dir,
+            user_id=user_id,
+            effort=get_effort(context),
         )
 
         if claude_response:
