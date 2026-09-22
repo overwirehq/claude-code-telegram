@@ -33,13 +33,16 @@ from telegram.ext import (
 from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
+from .commands import restart_command, sync_threads
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
+from .utils.error_messages import _format_error_message
 from .utils.html_format import escape_html
 from .utils.image_extractor import (
     ImageAttachment,
     should_send_as_photo,
     validate_image_path,
 )
+from .utils.working_directory import _update_working_directory_from_claude_response
 
 logger = structlog.get_logger()
 
@@ -328,8 +331,6 @@ class MessageOrchestrator:
 
     def _register_agentic_handlers(self, app: Application) -> None:
         """Register agentic handlers: commands + text/file/photo."""
-        from .handlers import command
-
         # Commands
         handlers = [
             ("start", self.agentic_start),
@@ -337,10 +338,10 @@ class MessageOrchestrator:
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
-            ("restart", command.restart_command),
+            ("restart", restart_command),
         ]
         if self.settings.enable_project_threads:
-            handlers.append(("sync_threads", command.sync_threads))
+            handlers.append(("sync_threads", sync_threads))
 
         # Derive known commands dynamically — avoids drift when new commands are added
         self._known_commands: frozenset[str] = frozenset(cmd for cmd, _ in handlers)
@@ -434,10 +435,10 @@ class MessageOrchestrator:
             ("export", command.export_session),
             ("actions", command.quick_actions),
             ("git", command.git_command),
-            ("restart", command.restart_command),
+            ("restart", restart_command),
         ]
         if self.settings.enable_project_threads:
-            handlers.append(("sync_threads", command.sync_threads))
+            handlers.append(("sync_threads", sync_threads))
 
         for cmd, handler in handlers:
             app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
@@ -1092,8 +1093,6 @@ class MessageOrchestrator:
             context.user_data["claude_session_id"] = claude_response.session_id
 
             # Track directory changes
-            from .handlers.message import _update_working_directory_from_claude_response
-
             _update_working_directory_from_claude_response(
                 claude_response, context, self.settings, user_id
             )
@@ -1128,7 +1127,6 @@ class MessageOrchestrator:
         except Exception as e:
             success = False
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
-            from .handlers.message import _format_error_message
             from .utils.formatting import FormattedMessage
 
             formatted_messages = [
@@ -1340,8 +1338,6 @@ class MessageOrchestrator:
 
             context.user_data["claude_session_id"] = claude_response.session_id
 
-            from .handlers.message import _update_working_directory_from_claude_response
-
             _update_working_directory_from_claude_response(
                 claude_response, context, self.settings, user_id
             )
@@ -1400,8 +1396,6 @@ class MessageOrchestrator:
                         logger.warning("Image send failed", error=str(img_err))
 
         except Exception as e:
-            from .handlers.message import _format_error_message
-
             await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
             logger.error("Claude file processing failed", error=str(e), user_id=user_id)
         finally:
@@ -1448,8 +1442,6 @@ class MessageOrchestrator:
             )
 
         except Exception as e:
-            from .handlers.message import _format_error_message
-
             await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
             logger.error(
                 "Claude photo processing failed", error=str(e), user_id=user_id
@@ -1489,8 +1481,6 @@ class MessageOrchestrator:
             )
 
         except Exception as e:
-            from .handlers.message import _format_error_message
-
             await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
             logger.error(
                 "Claude voice processing failed", error=str(e), user_id=user_id
@@ -1551,8 +1541,6 @@ class MessageOrchestrator:
             context.user_data["force_new_session"] = False
 
         context.user_data["claude_session_id"] = claude_response.session_id
-
-        from .handlers.message import _update_working_directory_from_claude_response
 
         _update_working_directory_from_claude_response(
             claude_response, context, self.settings, user_id

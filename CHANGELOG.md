@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Agentic mode no longer imports from the classic handlers**: `src/bot/orchestrator.py` pulled `_format_error_message` and `_update_working_directory_from_claude_response` out of `src/bot/handlers/message.py` at seven call sites, and registered `restart_command` and `sync_threads` from `src/bot/handlers/command.py`, which is what made classic mode undeletable. The two helpers now live in `src/bot/utils/error_messages.py` and `src/bot/utils/working_directory.py`; the two commands, which both modes register, live in `src/bot/commands.py`. Classic mode imports all four from the new homes, so nothing changes for either mode. The only `from .handlers` import left in the orchestrator is the classic registration inside `_register_classic_handlers`, and a new test walks the orchestrator's AST so another one cannot slip back in. This is the groundwork for classic-mode removal, roadmap item 4.1 in `docs/ROADMAP-v2.md`
+
 ## [1.8.0] - 2026-09-22
 
 Released as a minor rather than a patch: `claude-agent-sdk` moves from the 0.1

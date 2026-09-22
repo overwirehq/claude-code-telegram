@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.bot import commands as shared_commands
+from src.bot.commands import sync_threads
 from src.bot.handlers import callback, command
 from src.config import create_test_config
 
@@ -155,7 +157,7 @@ async def test_sync_threads_private_mode_rejects_non_private_chat(thread_setting
     }
     context.user_data = {}
 
-    await command.sync_threads(update, context)
+    await sync_threads(update, context)
 
     manager.sync_topics.assert_not_called()
     status_msg.edit_text.assert_called_once()
@@ -180,7 +182,7 @@ async def test_sync_threads_reloads_registry_from_yaml(thread_settings, monkeypa
 
     new_registry = MagicMock()
     load_mock = MagicMock(return_value=new_registry)
-    monkeypatch.setattr(command, "load_project_registry", load_mock)
+    monkeypatch.setattr(shared_commands, "load_project_registry", load_mock)
 
     status_msg = AsyncMock()
     status_msg.edit_text = AsyncMock()
@@ -201,7 +203,7 @@ async def test_sync_threads_reloads_registry_from_yaml(thread_settings, monkeypa
     }
     context.user_data = {}
 
-    await command.sync_threads(update, context)
+    await sync_threads(update, context)
 
     load_mock.assert_called_once_with(
         config_path=settings.projects_config_path,
@@ -256,7 +258,7 @@ async def test_sync_threads_group_mode_rejects_non_target_chat(tmp_path: Path):
     }
     context.user_data = {}
 
-    await command.sync_threads(update, context)
+    await sync_threads(update, context)
 
     manager.sync_topics.assert_not_called()
     status_msg.edit_text.assert_called_once()
