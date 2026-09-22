@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-09-22
+
+Released as a minor rather than a patch: `claude-agent-sdk` moves from the 0.1
+line to the 0.2 line, and the Claude Code CLI bundled with it goes from 2.1.49
+to 2.1.277. Behaviour is unchanged for a default install, but that is a large
+enough step under the bot to be worth its own version. This is the first item
+of M0 in `docs/ROADMAP-v2.md`, which plans to ship as 1.8.
+
 ### Documentation
 - **v2 roadmap**: `docs/ROADMAP-v2.md` plans the 2.0 release (SDK 0.2, interactive permission and question UX, per-conversation concurrency, session browser, classic-mode removal, container distribution), scoped to work not already covered by open pull requests
 - **Community files**: issue forms (bug, feature, question), a pull request template with a hand-testing section, `CODEOWNERS`, `MAINTAINERS.md` (roles, one-week response promise, label set, path to maintainership), a Contributor Covenant 2.1 `CODE_OF_CONDUCT.md`, and a rewritten `CONTRIBUTING.md` (PR scope rules, AI-assisted contribution policy, current project layout)
