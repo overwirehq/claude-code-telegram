@@ -29,6 +29,17 @@ name: Claude Code Review
 # no Write/Edit, no WebFetch, no arbitrary Bash. The action also scrubs
 # Anthropic, cloud and Actions secrets from subprocess environments when
 # this input is set. Worst case is a prompt-injected review comment.
+#
+# `allowed_bots` is the same gate for bot actors, and the action fails the
+# job red without it rather than skipping: a pull request opened by an app
+# died in ~20s with `Workflow initiated by non-human actor`. It is named
+# rather than `"*"` so a new bot has to be admitted deliberately.
+#
+# The job condition decides provenance separately: a bot-opened PR is
+# reviewed only when its branch lives in this repository, which takes write
+# access to push. Commit author fields are deliberately not the check --
+# `git commit --author` sets them to any name and address, so they prove
+# nothing. Who was able to push the branch is the property that does.
 
 on:
   pull_request_target:
@@ -43,7 +54,15 @@ concurrency:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
+    # Keep the bot login here in step with `allowed_bots` below: a bot this
+    # condition lets through but that input does not name still fails red.
+    # Any other bot skips (grey) instead. Human PRs are unaffected, forks
+    # included. See the header for why.
+    if: >-
+      github.event.pull_request.draft == false &&
+      (!endsWith(github.event.pull_request.user.login, '[bot]') ||
+      (github.event.pull_request.user.login == 'claude[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -66,6 +85,8 @@ jobs:
           # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
+          # Keep in step with the job condition above.
+          allowed_bots: "claude[bot]"
           use_sticky_comment: true
           prompt: |
             REPO: ${{ github.repository }}
