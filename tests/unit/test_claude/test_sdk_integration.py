@@ -839,6 +839,43 @@ class TestClaudeSandboxSettings:
         assert captured_options[0].allowed_tools == ["Read", "Write"]
         assert captured_options[0].disallowed_tools == ["WebFetch"]
 
+    async def test_none_tool_lists_coerced_to_empty_lists(self, tmp_path):
+        """None tool settings reach the SDK as [], never as None.
+
+        Both settings are Optional, but ClaudeAgentOptions declares them as
+        list[str]. claude-agent-sdk 0.2 stopped tolerating None: the transport
+        calls list(options.allowed_tools) and the connect-time shadowing check
+        iterates it, so None raises TypeError before the CLI starts.
+        """
+        config = Settings(
+            telegram_bot_token="test:token",
+            telegram_bot_username="testbot",
+            approved_directory=tmp_path,
+            claude_timeout_seconds=2,
+            claude_allowed_tools=None,
+            claude_disallowed_tools=None,
+        )
+        manager = ClaudeSDKManager(config)
+
+        captured_options: list = []
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("Test response"),
+            _make_result_message(total_cost_usd=0.01),
+            capture_options=captured_options,
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            await manager.execute_command(
+                prompt="Test prompt",
+                working_directory=tmp_path,
+            )
+
+        assert len(captured_options) == 1
+        assert captured_options[0].allowed_tools == []
+        assert captured_options[0].disallowed_tools == []
+
     async def test_empty_cli_path_coerced_to_none(self, tmp_path):
         """Empty CLAUDE_CLI_PATH ('') is coerced to None so SDK auto-discovers the CLI."""
         config = Settings(

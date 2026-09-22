@@ -79,16 +79,59 @@ behaviour for a default install.
 | 0.5 | Repository hygiene | S |
 | 0.6 | CI matrix and coverage gate | S |
 
-**0.1 SDK bump.** The 0.1 to 0.2 jump has three known breaking changes and
-the bot is already clear of two: the options class is `ClaudeAgentOptions`,
-and the bot passes its own `system_prompt` so the removed default prompt does
-not matter. The third is strict skill-name validation (0.2.129): names with
-spaces, commas or wildcards raise at connect time. Audit
-`CLAUDE_ALLOWED_TOOLS` parsing to strip whitespace (`.env.example` currently
-contains `Skill,AskUserQuestion,EnterPlanMode, ExitPlanMode` with a stray
-space). Files: `pyproject.toml`, `src/config/settings.py`,
-`src/claude/sdk_integration.py`. Done when the suite passes on 0.2.x and a
-live smoke test resumes an existing session.
+**0.1 SDK bump.** Moves the pin from `^0.1.39` to `^0.2.157`. This became
+urgent rather than planned: PyPI yanked 0.1.39 for deletion on or after
+2026-09-19, and since #224 both `ci.yml` and `release.yml` install from the
+committed lock, so the deletion would break every build.
+
+The Python API turned out to be a clean widening. Every symbol
+`src/claude/sdk_integration.py` imports still exists in 0.2.157, including the
+three private ones (`_errors.MessageParseError`,
+`_internal.message_parser.parse_message`, `types.StreamEvent`). 0.1.39
+exported 64 public names; 0.2.157 exports all 64 plus 69 more. Nothing was
+removed or narrowed. `ClaudeAgentOptions` changed two annotations, both
+widenings: `system_prompt` gained union members, and `effort`'s inline
+literal became the `EffortLevel` alias. The bot passes a plain `str` for the
+first and never sets the second.
+
+One real regression: 0.1.x tolerated `None` for `allowed_tools` /
+`disallowed_tools`, 0.2 does not. The transport calls
+`list(options.allowed_tools)`, and a new connect-time shadowing check
+iterates the same list, so `None` raises `TypeError` before the CLI starts.
+Both settings are `Optional`, so `execute_command` now normalises them to
+lists.
+
+An earlier draft of this item listed two things to audit. Neither survived
+contact:
+
+- *Strict skill-name validation (0.2.129) is a breaking change.* That
+  validation applies to `ClaudeAgentOptions.skills`, a field 0.2 introduced
+  and this bot never sets. It does not touch `allowed_tools`.
+- *`CLAUDE_ALLOWED_TOOLS` parsing needs to strip whitespace.*
+  `src/config/settings.py` already does `tool.strip()` per entry. The stray
+  space in `.env.example` was cosmetic, never a bug.
+
+The risk that is real sits below the Python API: the SDK bundles the Claude
+Code CLI, which jumps from 2.1.49 to 2.1.277. The suite mocks the SDK almost
+completely -- `tests/unit/test_claude/test_sdk_integration.py` and
+`tests/unit/test_bot/test_stop_button.py` are the only files that import it,
+and both patch heavily -- so a green suite shows the types line up, not that
+the runtime behaves. The bump was therefore also exercised against the real
+bundled CLI, driving `ClaudeSDKManager` directly with no mocks: session
+resume, a `can_use_tool` file denial, a Bash boundary rejection, the
+interrupt path behind the Stop button, `stream_callback` partial messages,
+and interactive approval in both the Allow and the Deny direction. All
+behaved as they did on 0.1.39.
+
+One observation worth carrying into #221: with `can_use_tool` set, 0.2 emits
+`CanUseToolShadowedWarning` at connect time naming every tool the callback
+will never see -- on a default install, `Glob, Grep, LS, Task, TaskOutput,
+WebFetch, TodoRead, TodoWrite, WebSearch, Skill`. That is the SDK detecting,
+by itself, the condition #219 reported and #220 fixed by hand.
+
+Files: `pyproject.toml`, `poetry.lock`, `src/claude/sdk_integration.py`,
+`docs/ROADMAP-v2.md`. Done when the suite passes on 0.2.x and a live smoke
+test resumes an existing session.
 
 **0.2 Result subtype.** `execute_command` reads `total_cost_usd` from the
 `ResultMessage` but ignores `subtype`. A run that ends with

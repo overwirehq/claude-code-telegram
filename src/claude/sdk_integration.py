@@ -371,22 +371,24 @@ class ClaudeSDKManager:
                     path=str(claude_md_path),
                 )
 
-            # When DISABLE_TOOL_VALIDATION=true, pass [] (not None) for
-            # allowed/disallowed tools. ClaudeAgentOptions declares these
-            # as list[str] with default_factory=list, so None violates the
-            # dataclass contract. The pinned SDK guards with a truthiness
-            # check and tolerates None, but the project floats on ^0.1.39
-            # and nothing promises that guard survives a minor bump. Both
-            # values are falsy, so the CLI omits the flags either way --
-            # which is the intent of DISABLE_TOOL_VALIDATION=true (#206).
-            sdk_allowed_tools: Optional[List[str]]
-            sdk_disallowed_tools: Optional[List[str]]
+            # Always pass a list (never None) for allowed/disallowed tools.
+            # ClaudeAgentOptions declares both as list[str] with
+            # default_factory=list. 0.1.x guarded with a truthiness check and
+            # tolerated None; 0.2 does not -- the transport calls
+            # list(options.allowed_tools), and the connect-time shadowing
+            # check iterates it, so None raises TypeError before the CLI even
+            # starts. Both settings are Optional, and a true
+            # DISABLE_TOOL_VALIDATION deliberately sends nothing (#206), so
+            # normalise every path to a list. [] and None are both falsy, so
+            # the CLI omits the flags either way.
+            sdk_allowed_tools: List[str]
+            sdk_disallowed_tools: List[str]
             if self.config.disable_tool_validation:
                 sdk_allowed_tools = []
                 sdk_disallowed_tools = []
             else:
-                sdk_allowed_tools = self.config.claude_allowed_tools
-                sdk_disallowed_tools = self.config.claude_disallowed_tools
+                sdk_allowed_tools = list(self.config.claude_allowed_tools or [])
+                sdk_disallowed_tools = list(self.config.claude_disallowed_tools or [])
 
             # The can_use_tool callback below is purely reactive: the SDK only
             # invokes it when the CLI sends a can_use_tool control request, and
@@ -415,7 +417,7 @@ class ClaudeSDKManager:
             if boundary_checks_active:
                 tools_to_strip = tools_to_strip | GUARDED_TOOLS
 
-            if sdk_allowed_tools is not None and tools_to_strip:
+            if tools_to_strip:
                 gated = [t for t in sdk_allowed_tools if t in tools_to_strip]
                 if gated:
                     sdk_allowed_tools = [
