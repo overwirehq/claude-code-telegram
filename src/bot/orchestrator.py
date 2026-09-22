@@ -1113,17 +1113,15 @@ class MessageOrchestrator:
                     logger.warning("Failed to log interaction", error=str(e))
 
             # Format response (no reply_markup — strip keyboards)
-            from .utils.formatting import ResponseFormatter
+            from .utils.formatting import ResponseFormatter, with_stop_reason
 
             formatter = ResponseFormatter(self.settings)
 
-            response_content = claude_response.content
-            if claude_response.interrupted:
-                response_content = (
-                    response_content or ""
-                ) + "\n\n_(Interrupted by user)_"
-
-            formatted_messages = formatter.format_claude_response(response_content)
+            # with_stop_reason carries the interruption note, the reason the
+            # run stopped, and any blocked tool calls (#230, #172).
+            formatted_messages = formatter.format_claude_response(
+                with_stop_reason(claude_response)
+            )
 
         except Exception as e:
             success = False
@@ -1346,11 +1344,11 @@ class MessageOrchestrator:
                 claude_response, context, self.settings, user_id
             )
 
-            from .utils.formatting import ResponseFormatter
+            from .utils.formatting import ResponseFormatter, with_stop_reason
 
             formatter = ResponseFormatter(self.settings)
             formatted_messages = formatter.format_claude_response(
-                claude_response.content
+                with_stop_reason(claude_response)
             )
 
             try:
@@ -1558,10 +1556,12 @@ class MessageOrchestrator:
             claude_response, context, self.settings, user_id
         )
 
-        from .utils.formatting import ResponseFormatter
+        from .utils.formatting import ResponseFormatter, with_stop_reason
 
         formatter = ResponseFormatter(self.settings)
-        formatted_messages = formatter.format_claude_response(claude_response.content)
+        formatted_messages = formatter.format_claude_response(
+            with_stop_reason(claude_response)
+        )
 
         try:
             await progress_msg.delete()

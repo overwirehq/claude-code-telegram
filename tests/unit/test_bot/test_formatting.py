@@ -299,6 +299,42 @@ class TestMarkdownToTelegramHtml:
         result = markdown_to_telegram_html("`code here`")
         assert "<code>code here</code>" in result
 
+    def test_multi_backtick_span_carries_backticks(self):
+        """A run of N backticks closes only on a run of N."""
+        result = markdown_to_telegram_html("``echo `whoami` in a shell``")
+        assert "<code>echo `whoami` in a shell</code>" in result
+
+    def test_triple_backtick_span_on_one_line(self):
+        result = markdown_to_telegram_html("``` ``x`` ```")
+        assert "<code>``x``</code>" in result
+
+    def test_one_space_is_stripped_from_each_end(self):
+        result = markdown_to_telegram_html("`` ` ``")
+        assert "<code>`</code>" in result
+
+    def test_space_is_not_stripped_from_one_end_alone(self):
+        result = markdown_to_telegram_html("` x`")
+        assert "<code> x</code>" in result
+
+    def test_all_space_content_is_left_alone(self):
+        result = markdown_to_telegram_html("`  `")
+        assert "<code>  </code>" in result
+
+    def test_unpaired_backtick_is_literal(self):
+        result = markdown_to_telegram_html("a ` b")
+        assert "<code>" not in result
+        assert "a ` b" in result
+
+    def test_two_spans_on_one_line_stay_separate(self):
+        result = markdown_to_telegram_html("`a` and `b`")
+        assert "<code>a</code> and <code>b</code>" in result
+
+    def test_span_content_is_not_markdown(self):
+        result = markdown_to_telegram_html("`_x_ **y**`")
+        assert "<code>_x_ **y**</code>" in result
+        assert "<i>" not in result
+        assert "<b>" not in result
+
     def test_fenced_code_block(self):
         result = markdown_to_telegram_html("```python\nprint('hi')\n```")
         assert "<pre>" in result

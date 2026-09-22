@@ -2,12 +2,195 @@
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ...config.settings import Settings
 from .html_format import escape_html, markdown_to_telegram_html
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard, typing only
+    from ...claude.sdk_integration import ClaudeResponse
+
+
+# Longest tool argument shown inside the blocked-calls list.
+DENIAL_ARG_MAX_LEN = 40
+# Blocked calls listed in full before the rest are summarised as "and N more".
+DENIAL_LIST_MAX = 5
+# Longest CLI error string echoed into the footer.
+STOP_DETAIL_MAX_LEN = 200
+# Shown in place of a stop reason when the user pressed Stop themselves.
+INTERRUPTED_NOTE = "_(Interrupted by user)_"
+
+# ResultMessage.subtype -> the clause that follows "Stopped: ". Only
+# non-success subtypes appear; the CLI's vocabulary is open-ended, so anything
+# unrecognised falls back to a generic clause naming the raw value.
+SUBTYPE_STOP_REASONS = {
+    "error_max_turns": "turn limit reached",
+    "error_max_budget_usd": "cost budget reached",
+    "error_during_execution": "the run hit an error and could not continue",
+}
+
+# ResultMessage.terminal_reason -> the same clause, preferred over the subtype
+# when it is one we recognise. The SDK types this ``str | None`` with no enum,
+# so unknown values are ignored rather than guessed at.
+TERMINAL_STOP_REASONS = {
+    "max_turns": "turn limit reached",
+    "aborted_streaming": "the run was cancelled",
+    "aborted_tools": "the run was cancelled while a tool was running",
+    "api_error": "the API returned an error",
+    "budget_exceeded": "cost budget reached",
+    "max_budget": "cost budget reached",
+}
+
+# Clauses that already say everything the CLI's own prose would; echoing
+# errors[] under one of these just repeats the sentence above it.
+SELF_EXPLANATORY_STOP_REASONS = {
+    "turn limit reached",
+    "cost budget reached",
+    "the run was cancelled",
+    "the run was cancelled while a tool was running",
+}
+
+
+def _shorten(text: str, limit: int) -> str:
+    """Collapse whitespace and clip to ``limit`` characters."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1] + "…"
+
+
+def _inline_code(text: str) -> str:
+    """Wrap machine output so the Markdown pass leaves it alone.
+
+    The footer is appended to Claude's reply and goes through
+    ``markdown_to_telegram_html`` with it, which italicises ``_like this_``.
+    That mangles paths and shell commands, and on a line listing several
+    denials the italics bleed from one entry into the next. Inline code is
+    extracted before any Markdown conversion and escaped verbatim, so it is
+    the one wrapper that survives.
+
+    Backticks in the value are kept. Deleting them would silently rewrite the
+    thing being reported -- ``echo `whoami`` runs a command, ``echo whoami``
+    prints a word -- and the reader cannot tell a rewrite from the real
+    argument. Clipping for length is visible, because it leaves an ellipsis;
+    this would not be. So the delimiter is a run one backtick longer than the
+    longest run inside the value, which closes only on a run of its own
+    length, and a value that begins or ends with a backtick is padded with a
+    space at each end for the Markdown pass to strip back off.
+    """
+    longest_run = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest_run + 1)
+    if text.startswith("`") or text.endswith("`"):
+        text = f" {text} "
+    return f"{fence}{text}{fence}"
+
+
+def _denial_argument(tool_input: Dict[str, Any]) -> str:
+    """Pick the most identifying argument of a blocked tool call."""
+    if not isinstance(tool_input, dict):
+        return ""
+
+    for key in ("file_path", "path", "notebook_path", "command", "pattern", "url"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return _shorten(value, DENIAL_ARG_MAX_LEN)
+    return ""
+
+
+def format_permission_denials(denials: List[Dict[str, Any]]) -> Optional[str]:
+    """Summarise the tool calls a run had blocked, or None if there were none.
+
+    This bot generates denials itself -- every APPROVED_DIRECTORY rejection,
+    every Bash boundary violation, every Deny on an interactive approval
+    prompt -- and until now the only account of them a user saw was Claude's
+    own narration, which is not authoritative.
+    """
+    if not denials or not isinstance(denials, list):
+        return None
+
+    # Filtered before slicing: a run of malformed entries at the front would
+    # otherwise swallow the whole list and report nothing was blocked.
+    usable = [denial for denial in denials if isinstance(denial, dict)]
+
+    described: List[str] = []
+    for denial in usable[:DENIAL_LIST_MAX]:
+        name = str(denial.get("tool_name") or "unknown")
+        argument = _denial_argument(denial.get("tool_input") or {})
+        described.append(f"{name}({_inline_code(argument)})" if argument else name)
+
+    if not described:
+        return None
+
+    remaining = len(denials) - len(described)
+    if remaining > 0:
+        described.append(f"and {remaining} more")
+
+    count = len(denials)
+    noun = "tool call was" if count == 1 else "tool calls were"
+    return f"🚫 {count} {noun} blocked: " + ", ".join(described)
+
+
+def format_stop_reason(response: "ClaudeResponse") -> Optional[str]:
+    """Build the footer explaining why a run ended, or None if it ended cleanly.
+
+    A run killed at the turn limit produces no final text, so without this the
+    bot falls through to its "Task completed" placeholder and reports a
+    truncated run as a success (#172).
+
+    The footer is appended to Claude's reply and renders with it, so the parts
+    that carry machine output -- tool arguments, the CLI's own error prose --
+    are wrapped as inline code to survive the Markdown pass unchanged. See
+    :func:`_inline_code`.
+    """
+    lines: List[str] = []
+
+    if response.interrupted:
+        # The user pressed Stop, so they know why this one ended; naming the
+        # cancellation a second time would only be noise. The blocked calls
+        # below are still worth having.
+        lines.append(INTERRUPTED_NOTE)
+    elif not response.completed_normally:
+        terminal = (response.terminal_reason or "").strip().lower()
+        subtype = (response.result_subtype or "").strip().lower()
+        reason = TERMINAL_STOP_REASONS.get(terminal) or SUBTYPE_STOP_REASONS.get(
+            subtype
+        )
+        if reason is None:
+            reason = f"the run ended early ({subtype or terminal or 'unknown reason'})"
+
+        sentence = f"⚠️ Stopped: {reason}"
+        if response.num_turns:
+            turns = "turn" if response.num_turns == 1 else "turns"
+            sentence += f" after {response.num_turns} {turns}"
+        lines.append(sentence + ". Send a message to continue.")
+
+        # A terminal error carries its prose in errors[]; for anything the
+        # clause above does not already explain, that is the only place the
+        # actual cause appears.
+        if reason not in SELF_EXPLANATORY_STOP_REASONS:
+            detail = next((e.strip() for e in response.errors if e and e.strip()), None)
+            if detail:
+                lines.append(_inline_code(_shorten(detail, STOP_DETAIL_MAX_LEN)))
+
+    denials = format_permission_denials(response.permission_denials)
+    if denials:
+        lines.append(denials)
+
+    if not lines:
+        return None
+    return "\n\n" + "\n".join(lines)
+
+
+def with_stop_reason(response: "ClaudeResponse") -> str:
+    """Claude's reply plus its stop-reason footer.
+
+    Every place the bot renders a Claude reply goes through this, so a run
+    truncated at the turn limit cannot read as a success through one entry
+    point while saying so through another (#172, #230).
+    """
+    return (response.content or "") + (format_stop_reason(response) or "")
 
 
 @dataclass

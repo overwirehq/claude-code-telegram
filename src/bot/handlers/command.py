@@ -425,11 +425,11 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await status_msg.delete()
 
             # Format and send Claude's response
-            from ..utils.formatting import ResponseFormatter
+            from ..utils.formatting import ResponseFormatter, with_stop_reason
 
             formatter = ResponseFormatter(settings)
             formatted_messages = formatter.format_claude_response(
-                claude_response.content
+                with_stop_reason(claude_response)
             )
 
             for msg in formatted_messages:
