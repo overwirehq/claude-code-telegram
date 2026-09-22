@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The Claude review workflow posts one review per pull request instead of one per push**: the job reruns on every `synchronize` and posted a fresh comment each time, so #236 collected nine full reviews in four and a half hours, each restating what the last had already settled. `use_sticky_comment` was set but does nothing here — it only applies to the action's tag mode, and this workflow supplies `prompt`, so the action posts nothing itself and the review is whatever the prompt tells Claude to post. The prompt now edits its own previous comment with `gh pr comment --edit-last --create-if-none`, so the pull request carries one review at the current head and GitHub keeps the superseded text in the comment's edit history. The inert input is removed rather than left to look load-bearing
+- **The review reports only what should block the merge**: most of the length of those nine reviews was praise, an account of what had been checked, and cosmetic nits ("after 1 turns"), and every nit drew another push, which triggered another review — that loop, not the reviewing, was the spam. The prompt now names what qualifies (a security regression, a bug, an untested behaviour change, a missing setting or CHANGELOG entry) and rules out the rest, including anything `black`, `isort` or `flake8` already gates, and findings that cannot be confirmed from the code. It also reads its own previous review first and does not raise a finding the author has fixed or answered
+- **The `review` check no longer goes red when the reviewer runs out of turns**: exhausting `--max-turns` is not a graceful stop — the action exits with no output, so the check fails and reads like the pull request is broken, which is what happened on #236 once its diff reached thirteen files. The narrower prompt above is the fix; the ceiling also moves from 40 to 80 for headroom
+
 ## [1.8.0] - 2026-09-22
 
 Released as a minor rather than a patch: `claude-agent-sdk` moves from the 0.1

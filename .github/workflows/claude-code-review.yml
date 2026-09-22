@@ -40,6 +40,31 @@ name: Claude Code Review
 # access to push. Commit author fields are deliberately not the check --
 # `git commit --author` sets them to any name and address, so they prove
 # nothing. Who was able to push the branch is the property that does.
+#
+# One comment per pull request, not one per push. The review runs again on
+# every `synchronize`, and it used to post a fresh comment each time: #236
+# collected nine full reviews in four and a half hours, each one restating
+# what the last had already settled. The action's own `use_sticky_comment`
+# does not help here -- it only applies to tag mode, and this workflow
+# supplies `prompt`, so the action posts nothing itself and the review is
+# whatever the prompt tells Claude to post. So the prompt now edits the
+# previous comment in place with `gh pr comment --edit-last
+# --create-if-none`. The pull request carries one review, reflecting the
+# current head; GitHub keeps the superseded text in the comment's edit
+# history. `--edit-last` targets the last comment by the token's own
+# account, and no other workflow here comments as `github-actions[bot]`.
+#
+# `--max-turns` is 80, up from 40. Exhausting it is not a graceful stop:
+# the action exits with no output, so the `review` check goes red and reads
+# like the pull request is broken. #236 hit that at 40 turns once the diff
+# reached thirteen files, having spent turns re-verifying earlier rounds.
+# The narrower prompt above is the real fix; the higher ceiling is headroom.
+#
+# The prompt reports only what should block the merge. The nine reviews on
+# #236 spent most of their length on praise, on narrating what had been
+# checked, and on cosmetic nits ("after 1 turns"), and every nit drew
+# another push, which triggered another review. That loop, not the
+# reviewing, was the spam.
 
 on:
   pull_request_target:
@@ -87,7 +112,6 @@ jobs:
           allowed_non_write_users: "*"
           # Keep in step with the job condition above.
           allowed_bots: "claude[bot]"
-          use_sticky_comment: true
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -102,31 +126,60 @@ jobs:
             architecture and the five-layer security model, then review
             the diff of this pull request.
 
-            Report only findings you are confident about, most severe
-            first. Focus on:
-            1. Security regressions: anything that widens what a Telegram
-               user can make Claude do on the host. Path checks against
-               APPROVED_DIRECTORY, the can_use_tool callback, the
-               SecurityValidator patterns, webhook signature checks,
-               secrets in logs, new settings that relax defaults.
-            2. Correctness: async misuse (blocking calls, missing awaits,
-               shared state across concurrent updates), datetime handling
-               (must be timezone-aware UTC), SQLite migrations, Telegram
-               API limits (message length, rate limits, HTML escaping).
-            3. Scope: does the PR do one thing? Does CHANGELOG.md have an
-               entry? Are new settings documented in .env.example and
-               docs/configuration.md and defaulted to current behaviour?
-            4. Tests: are behaviour changes covered? Do tests assert the
-               new behaviour rather than mock it away?
+            This job runs again on every push. Start by reading your own
+            previous review and the replies to it with `gh pr view
+            --comments`. A finding the author has fixed or answered is
+            settled: do not raise it a second time. Review what the diff
+            does at this head, not the history of how it got here, and do
+            not re-derive what you confirmed in an earlier round.
 
-            Post one review comment using `gh pr comment` with a short
-            summary, then the findings as a list with file:line
-            references. If there is nothing worth raising, say so in one
-            line. Do not approve, request changes, merge, or push.
+            Report only what should stop this merging:
+
+            - A security regression: anything that widens what a Telegram
+              user can make Claude do on the host. Path checks against
+              APPROVED_DIRECTORY, the can_use_tool callback, the
+              SecurityValidator patterns, webhook signature checks,
+              secrets in logs, a new setting that relaxes a default.
+            - A bug: async misuse (blocking calls, missing awaits, shared
+              state across concurrent updates), a naive datetime where the
+              codebase requires timezone-aware UTC, a SQLite migration
+              that can fail, a Telegram API limit (message length, rate
+              limits, HTML escaping) the change can exceed.
+            - A behaviour change with no test covering it, or a test that
+              mocks the new behaviour away instead of asserting it.
+            - A new setting missing from .env.example or
+              docs/configuration.md, one that does not default to current
+              behaviour, or a missing CHANGELOG.md entry.
+            - A second, unrelated concern mixed into the same pull
+              request. Name the change that does not belong; do not
+              speculate about how the work might have been divided.
+
+            Post nothing else. No summary of what the change gets right,
+            no praise, no note that you found no prompt injection, no
+            account of what you checked or how you checked it, and no
+            style, naming, grammar or formatting nits -- black, isort and
+            flake8 gate those already, and each one costs the author
+            another push and this job another run. A finding you cannot
+            confirm from the code is not a finding: leave it out rather
+            than flagging it to be looked into.
+
+            Post the review by editing your own previous comment, so the
+            pull request carries one review at the current head rather
+            than one per push:
+
+              gh pr comment <PR NUMBER> --edit-last --create-if-none --body "..."
+
+            If that call fails, fall back to `gh pr comment <PR NUMBER>
+            --body "..."` rather than leaving the review unposted.
+
+            The body is the findings as a list, most severe first, each
+            with a file:line reference and the input or state that
+            triggers it. If nothing meets the bar, the body is one line
+            saying so. Do not approve, request changes, merge, or push.
           claude_args: >-
             --allowed-tools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(git diff:*),Bash(git log:*)"
             --disallowed-tools "Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch"
             --model sonnet
-            --max-turns 40
+            --max-turns 80
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
