@@ -6,6 +6,7 @@ classic mode, delegates to existing full-featured handlers.
 """
 
 import asyncio
+import os
 import re
 import time
 import uuid
@@ -34,6 +35,11 @@ from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
+from .utils.file_extractor import (
+    REJECTION_SURFACE_TO_USER,
+    FileAttachment,
+    validate_file_path,
+)
 from .utils.html_format import escape_html
 from .utils.image_extractor import (
     ImageAttachment,
@@ -780,6 +786,8 @@ class MessageOrchestrator:
         start_time: float,
         reply_markup: Optional[InlineKeyboardMarkup] = None,
         mcp_images: Optional[List[ImageAttachment]] = None,
+        mcp_files: Optional[List[FileAttachment]] = None,
+        mcp_rejected_files: Optional[List[str]] = None,
         approved_directory: Optional[Path] = None,
         draft_streamer: Optional[DraftStreamer] = None,
         interrupt_event: Optional[asyncio.Event] = None,
@@ -790,15 +798,21 @@ class MessageOrchestrator:
         ``send_image_to_user`` tool calls and collects validated
         :class:`ImageAttachment` objects for later Telegram delivery.
 
+        When *mcp_files* is provided, the callback intercepts
+        ``send_file_to_user`` tool calls and collects validated
+        :class:`FileAttachment` objects the same way.
+
         When *draft_streamer* is provided, tool activity and assistant
         text are streamed to the user in real time via
         ``sendMessageDraft``.
 
-        Returns None when verbose_level is 0 **and** no MCP image
+        Returns None when verbose_level is 0 **and** no MCP image/file
         collection or draft streaming is requested.
         Typing indicators are handled by a separate heartbeat task.
         """
-        need_mcp_intercept = mcp_images is not None and approved_directory is not None
+        need_mcp_intercept = (
+            mcp_images is not None or mcp_files is not None
+        ) and approved_directory is not None
 
         if verbose_level == 0 and not need_mcp_intercept and draft_streamer is None:
             return None
@@ -810,23 +824,44 @@ class MessageOrchestrator:
             if interrupt_event is not None and interrupt_event.is_set():
                 return
 
-            # Intercept send_image_to_user MCP tool calls.
+            # Intercept send_image_to_user / send_file_to_user MCP tool calls.
             # The SDK namespaces MCP tools as "mcp__<server>__<tool>",
             # so match both the bare name and the namespaced variant.
             if update_obj.tool_calls and need_mcp_intercept:
                 for tc in update_obj.tool_calls:
                     tc_name = tc.get("name", "")
-                    if tc_name == "send_image_to_user" or tc_name.endswith(
-                        "__send_image_to_user"
+                    tc_input = tc.get("input", {})
+                    file_path = tc_input.get("file_path", "")
+                    caption = tc_input.get("caption", "")
+                    if mcp_images is not None and (
+                        tc_name == "send_image_to_user"
+                        or tc_name.endswith("__send_image_to_user")
                     ):
-                        tc_input = tc.get("input", {})
-                        file_path = tc_input.get("file_path", "")
-                        caption = tc_input.get("caption", "")
                         img = validate_image_path(
                             file_path, approved_directory, caption
                         )
                         if img:
                             mcp_images.append(img)
+                    elif mcp_files is not None and (
+                        tc_name == "send_file_to_user"
+                        or tc_name.endswith("__send_file_to_user")
+                    ):
+                        attachment, reason = validate_file_path(
+                            file_path, approved_directory, caption
+                        )
+                        if attachment:
+                            mcp_files.append(attachment)
+                        elif (
+                            mcp_rejected_files is not None
+                            and file_path
+                            and reason in REJECTION_SURFACE_TO_USER
+                        ):
+                            # Only surface bot-side rejections (outside
+                            # approved dir, secrets blocklist) — the MCP tool
+                            # already returned an error for size/empty/etc.,
+                            # so Claude will describe those accurately on its
+                            # own; our summary would just duplicate/mislead.
+                            mcp_rejected_files.append(file_path)
 
             # Capture tool calls
             if update_obj.tool_calls:
@@ -971,6 +1006,101 @@ class MessageOrchestrator:
 
         return caption_sent
 
+    async def _send_documents(
+        self,
+        update: Update,
+        files: List[FileAttachment],
+        rejected: Optional[List[str]] = None,
+        reply_to_message_id: Optional[int] = None,
+    ) -> None:
+        """Send files collected from ``send_file_to_user`` as Telegram documents.
+
+        Each file is sent independently with its own caption; Telegram does not
+        support grouping documents into an album. On per-file failure we log a
+        warning and continue with the rest.
+
+        *rejected* carries paths that were refused by bot-side security
+        validation (``outside_approved`` or ``blocked_secret``). These are
+        listed in the same summary message so the user isn't misled by
+        Claude's "file sent" reply. Tool-side rejections
+        (``too_large``/``empty``/``not_a_file``) are not surfaced here —
+        Claude already sees the error from the MCP tool and describes it
+        accurately on its own.
+
+        Each file is re-opened with ``O_NOFOLLOW`` and its inode/device is
+        compared against what was captured at validation time, to prevent a
+        TOCTOU where the path is swapped for a symlink (e.g. to a secret)
+        between the stream callback and this call.
+        """
+        if not files and not rejected:
+            return
+
+        failed: List[str] = []
+        for attachment in files:
+            try:
+                fd = os.open(str(attachment.path), os.O_RDONLY | os.O_NOFOLLOW)
+            except OSError as e:
+                logger.warning(
+                    "TOCTOU-safe open failed for MCP document",
+                    path=str(attachment.path),
+                    error=str(e),
+                )
+                failed.append(attachment.path.name)
+                continue
+
+            try:
+                file_stat = os.fstat(fd)
+                if (
+                    file_stat.st_ino != attachment.inode
+                    or file_stat.st_dev != attachment.device
+                ):
+                    logger.warning(
+                        "File identity changed since validation — refusing send",
+                        path=str(attachment.path),
+                    )
+                    os.close(fd)
+                    failed.append(attachment.path.name)
+                    continue
+
+                with os.fdopen(fd, "rb") as f:
+                    await update.message.reply_document(
+                        document=f,
+                        filename=attachment.path.name,
+                        caption=attachment.caption or None,
+                        reply_to_message_id=reply_to_message_id,
+                    )
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.warning(
+                    "Failed to send MCP document",
+                    path=str(attachment.path),
+                    error=str(e),
+                )
+                failed.append(attachment.path.name)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+        lines: List[str] = []
+        if failed:
+            lines.append(f"⚠️ Failed to send: {', '.join(failed)}")
+        if rejected:
+            rejected_names = ", ".join(Path(p).name or p for p in rejected)
+            lines.append(
+                "🚫 Rejected by security policy "
+                "(outside APPROVED_DIRECTORY or blocked secret file): "
+                f"{rejected_names}"
+            )
+        if lines:
+            try:
+                await update.message.reply_text(
+                    "\n".join(lines),
+                    reply_to_message_id=reply_to_message_id,
+                )
+            except Exception as e:
+                logger.debug("Failed to send document error summary", error=str(e))
+
     async def agentic_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1036,6 +1166,8 @@ class MessageOrchestrator:
         tool_log: List[Dict[str, Any]] = []
         start_time = time.time()
         mcp_images: List[ImageAttachment] = []
+        mcp_files: List[FileAttachment] = []
+        mcp_rejected_files: List[str] = []
 
         # Stream drafts (private chats only)
         draft_streamer: Optional[DraftStreamer] = None
@@ -1055,6 +1187,8 @@ class MessageOrchestrator:
             start_time,
             reply_markup=stop_kb,
             mcp_images=mcp_images,
+            mcp_files=mcp_files,
+            mcp_rejected_files=mcp_rejected_files,
             approved_directory=self.settings.approved_directory,
             draft_streamer=draft_streamer,
             interrupt_event=interrupt_event,
@@ -1218,6 +1352,19 @@ class MessageOrchestrator:
                 except Exception as img_err:
                     logger.warning("Image send failed", error=str(img_err))
 
+        # Send MCP-collected files (from send_file_to_user tool calls) and
+        # notify the user about any paths rejected by bot-side validation.
+        if mcp_files or mcp_rejected_files:
+            try:
+                await self._send_documents(
+                    update,
+                    mcp_files,
+                    rejected=mcp_rejected_files,
+                    reply_to_message_id=update.message.message_id,
+                )
+            except Exception as file_err:
+                logger.warning("Document send failed", error=str(file_err))
+
         # Audit log
         audit_logger = context.bot_data.get("audit_logger")
         if audit_logger:
@@ -1315,12 +1462,16 @@ class MessageOrchestrator:
         verbose_level = self._get_verbose_level(context)
         tool_log: List[Dict[str, Any]] = []
         mcp_images_doc: List[ImageAttachment] = []
+        mcp_files_doc: List[FileAttachment] = []
+        mcp_rejected_files_doc: List[str] = []
         on_stream = self._make_stream_callback(
             verbose_level,
             progress_msg,
             tool_log,
             time.time(),
             mcp_images=mcp_images_doc,
+            mcp_files=mcp_files_doc,
+            mcp_rejected_files=mcp_rejected_files_doc,
             approved_directory=self.settings.approved_directory,
         )
 
@@ -1398,6 +1549,17 @@ class MessageOrchestrator:
                         )
                     except Exception as img_err:
                         logger.warning("Image send failed", error=str(img_err))
+
+            if mcp_files_doc or mcp_rejected_files_doc:
+                try:
+                    await self._send_documents(
+                        update,
+                        mcp_files_doc,
+                        rejected=mcp_rejected_files_doc,
+                        reply_to_message_id=update.message.message_id,
+                    )
+                except Exception as file_err:
+                    logger.warning("Document send failed", error=str(file_err))
 
         except Exception as e:
             from .handlers.message import _format_error_message
@@ -1524,12 +1686,16 @@ class MessageOrchestrator:
         verbose_level = self._get_verbose_level(context)
         tool_log: List[Dict[str, Any]] = []
         mcp_images_media: List[ImageAttachment] = []
+        mcp_files_media: List[FileAttachment] = []
+        mcp_rejected_files_media: List[str] = []
         on_stream = self._make_stream_callback(
             verbose_level,
             progress_msg,
             tool_log,
             time.time(),
             mcp_images=mcp_images_media,
+            mcp_files=mcp_files_media,
+            mcp_rejected_files=mcp_rejected_files_media,
             approved_directory=self.settings.approved_directory,
         )
 
@@ -1608,6 +1774,17 @@ class MessageOrchestrator:
                     )
                 except Exception as img_err:
                     logger.warning("Image send failed", error=str(img_err))
+
+        if mcp_files_media or mcp_rejected_files_media:
+            try:
+                await self._send_documents(
+                    update,
+                    mcp_files_media,
+                    rejected=mcp_rejected_files_media,
+                    reply_to_message_id=update.message.message_id,
+                )
+            except Exception as file_err:
+                logger.warning("Document send failed", error=str(file_err))
 
     async def _handle_unknown_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
