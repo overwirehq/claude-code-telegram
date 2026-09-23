@@ -88,7 +88,7 @@ class TestRedactProxyUrl:
 async def test_initialize_configures_proxy_from_environment(
     bot_with_builder, monkeypatch
 ):
-    """HTTPS_PROXY in the environment must reach builder.proxy()."""
+    """HTTPS_PROXY must reach both PTB request clients."""
     monkeypatch.setenv("HTTPS_PROXY", "http://alice:s3cret@proxy.internal:3128")
     monkeypatch.delenv("HTTP_PROXY", raising=False)
     bot, builder = bot_with_builder
@@ -96,6 +96,9 @@ async def test_initialize_configures_proxy_from_environment(
     await bot.initialize()
 
     builder.proxy.assert_called_once_with("http://alice:s3cret@proxy.internal:3128")
+    builder.get_updates_proxy.assert_called_once_with(
+        "http://alice:s3cret@proxy.internal:3128"
+    )
 
 
 @pytest.mark.asyncio
@@ -132,3 +135,4 @@ async def test_initialize_skips_proxy_when_unset(bot_with_builder, monkeypatch):
     await bot.initialize()
 
     builder.proxy.assert_not_called()
+    builder.get_updates_proxy.assert_not_called()

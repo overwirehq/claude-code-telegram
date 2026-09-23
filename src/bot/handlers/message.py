@@ -5,6 +5,7 @@ from typing import Optional
 
 import structlog
 from telegram import InputMediaPhoto, Update
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import ContextTypes
 
 from ...claude.exceptions import (
@@ -26,6 +27,7 @@ from ..utils.image_extractor import (
     should_send_as_photo,
     validate_image_path,
 )
+from ..utils.telegram_retry import retry_telegram_network
 
 logger = structlog.get_logger()
 
@@ -305,6 +307,7 @@ async def handle_text_message(
     # Get services
     rate_limiter: Optional[RateLimiter] = context.bot_data.get("rate_limiter")
     audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
+    progress_msg = None
 
     logger.info(
         "Processing text message", user_id=user_id, message_length=len(message_text)
@@ -323,12 +326,18 @@ async def handle_text_message(
                 return
 
         # Send typing indicator
-        await update.message.chat.send_action("typing")
+        try:
+            await update.message.chat.send_action("typing")
+        except NetworkError as exc:
+            # Typing indicators are cosmetic and must not abort a real request.
+            logger.debug("Failed to send typing action, ignoring", error=str(exc))
 
         # Create progress message
-        progress_msg = await update.message.reply_text(
-            "🤔 Processing your request...",
-            reply_to_message_id=update.message.message_id,
+        progress_msg = await retry_telegram_network(
+            lambda: update.message.reply_text(
+                "🤔 Processing your request...",
+                reply_to_message_id=update.message.message_id,
+            )
         )
 
         # Get Claude integration and storage from context
@@ -438,7 +447,10 @@ async def handle_text_message(
             ]
 
         # Delete progress message
-        await progress_msg.delete()
+        try:
+            await progress_msg.delete()
+        except Exception as exc:
+            logger.debug("Failed to delete progress message, ignoring", error=str(exc))
 
         # Use MCP-collected images (from send_image_to_user tool calls)
         images: list[ImageAttachment] = mcp_images
@@ -494,42 +506,49 @@ async def handle_text_message(
             # Send formatted responses (may be multiple messages)
             for i, message in enumerate(formatted_messages):
                 try:
-                    await update.message.reply_text(
-                        message.text,
-                        parse_mode=message.parse_mode,
-                        reply_markup=message.reply_markup,
-                        reply_to_message_id=(
-                            update.message.message_id if i == 0 else None
-                        ),
-                    )
-                    if i < len(formatted_messages) - 1:
-                        await asyncio.sleep(0.5)
-                except Exception as send_err:
-                    logger.warning(
-                        "Failed to send HTML response, retrying as plain text",
-                        error=str(send_err),
-                        message_index=i,
-                    )
-                    try:
-                        await update.message.reply_text(
+                    await retry_telegram_network(
+                        lambda: update.message.reply_text(
                             message.text,
+                            parse_mode=message.parse_mode,
                             reply_markup=message.reply_markup,
                             reply_to_message_id=(
                                 update.message.message_id if i == 0 else None
                             ),
                         )
+                    )
+                    if i < len(formatted_messages) - 1:
+                        await asyncio.sleep(0.5)
+                except BadRequest as send_err:
+                    logger.warning(
+                        "Failed to send formatted response, retrying as plain text",
+                        error=str(send_err),
+                        message_index=i,
+                    )
+                    try:
+                        await retry_telegram_network(
+                            lambda: update.message.reply_text(
+                                message.text,
+                                reply_markup=message.reply_markup,
+                                reply_to_message_id=(
+                                    update.message.message_id if i == 0 else None
+                                ),
+                            )
+                        )
                     except Exception as plain_err:
+                        plain_error_text = str(plain_err)[:150]
                         logger.error(
                             "Failed to send plain text fallback response",
-                            error=str(plain_err),
+                            error=plain_error_text,
                         )
-                        await update.message.reply_text(
-                            f"Failed to deliver response "
-                            f"(Telegram error: {str(plain_err)[:150]}). "
-                            f"Please try again.",
-                            reply_to_message_id=(
-                                update.message.message_id if i == 0 else None
-                            ),
+                        await retry_telegram_network(
+                            lambda: update.message.reply_text(
+                                f"Failed to deliver response "
+                                f"(Telegram error: {plain_error_text}). "
+                                f"Please try again.",
+                                reply_to_message_id=(
+                                    update.message.message_id if i == 0 else None
+                                ),
+                            )
                         )
 
             # Send images separately
@@ -635,12 +654,18 @@ async def handle_text_message(
 
     except Exception as e:
         # Clean up progress message if it exists
-        try:
-            await progress_msg.delete()
-        except Exception as delete_error:
-            logger.debug("Failed to delete progress message", error=str(delete_error))
+        if progress_msg is not None:
+            try:
+                await progress_msg.delete()
+            except Exception as delete_error:
+                logger.debug(
+                    "Failed to delete progress message", error=str(delete_error)
+                )
 
-        await update.message.reply_text(_format_error_message(e), parse_mode="HTML")
+        error_message = _format_error_message(e)
+        await retry_telegram_network(
+            lambda: update.message.reply_text(error_message, parse_mode="HTML")
+        )
 
         # Log failed processing
         if audit_logger:

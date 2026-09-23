@@ -27,6 +27,7 @@ from ..config.settings import Settings
 from ..exceptions import ClaudeCodeTelegramError
 from .features.registry import FeatureRegistry
 from .orchestrator import MessageOrchestrator
+from .utils.telegram_retry import retry_telegram_network
 
 logger = structlog.get_logger()
 
@@ -105,6 +106,7 @@ class ClaudeCodeBot:
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         if proxy_url:
             builder.proxy(proxy_url)
+            builder.get_updates_proxy(proxy_url)
             logger.info("Proxy configured", proxy=_redact_proxy_url(proxy_url))
 
         self.app = builder.build()
@@ -343,7 +345,9 @@ class ClaudeCodeBot:
         # Try to notify user
         if update and update.effective_message:
             try:
-                await update.effective_message.reply_text(user_message)
+                await retry_telegram_network(
+                    lambda: update.effective_message.reply_text(user_message)
+                )
             except Exception:
                 logger.exception("Failed to send error message to user")
 
