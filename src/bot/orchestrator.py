@@ -40,6 +40,7 @@ from .utils.image_extractor import (
     should_send_as_photo,
     validate_image_path,
 )
+from .utils.quote_prompt import build_user_prompt
 
 logger = structlog.get_logger()
 
@@ -976,7 +977,9 @@ class MessageOrchestrator:
     ) -> None:
         """Direct Claude passthrough. Simple progress. No suggestions."""
         user_id = update.effective_user.id
-        message_text = update.message.text
+        # Include reply/quote context so Claude sees the fragment the user is
+        # responding to, not just their new text.
+        message_text = build_user_prompt(update.message)
 
         logger.info(
             "Agentic text message",

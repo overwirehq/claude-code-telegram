@@ -25,6 +25,7 @@ from ..utils.image_extractor import (
     should_send_as_photo,
     validate_image_path,
 )
+from ..utils.quote_prompt import build_user_prompt
 
 logger = structlog.get_logger()
 
@@ -298,7 +299,9 @@ async def handle_text_message(
 ) -> None:
     """Handle regular text messages as Claude prompts."""
     user_id = update.effective_user.id
-    message_text = update.message.text
+    # Include reply/quote context so Claude sees the fragment the user is
+    # responding to, not just their new text.
+    message_text = build_user_prompt(update.message)
     settings: Settings = context.bot_data["settings"]
 
     # Get services
