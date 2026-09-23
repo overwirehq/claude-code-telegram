@@ -63,6 +63,14 @@ TASK_STOPPED_MSG = "No final response. Tools used: {tools_summary}"
 RESULT_SUBTYPE_SUCCESS = "success"
 
 
+class _IncompleteMessageStreamError(CLIConnectionError):
+    """The SDK transport closed before delivering its terminal result."""
+
+    def __init__(self, *, retry_safe: bool):
+        super().__init__("Claude message stream ended before ResultMessage")
+        self.retry_safe = retry_safe
+
+
 def _as_error_list(value: Any) -> List[str]:
     """Normalise ResultMessage.errors into a list of strings."""
     if not value:
@@ -394,6 +402,8 @@ class ClaudeSDKManager:
         Only non-MCP CLIConnectionError is considered transient.
         """
         if isinstance(exc, CLIConnectionError):
+            if isinstance(exc, _IncompleteMessageStreamError):
+                return exc.retry_safe
             msg = str(exc).lower()
             return "mcp" not in msg  # "server" alone is too broad
         return False
@@ -568,6 +578,8 @@ class ClaudeSDKManager:
 
             async def _run_client() -> None:
                 client = ClaudeSDKClient(options)
+                received_raw_message = False
+                received_result = False
                 try:
                     await client.connect()
 
@@ -603,6 +615,7 @@ class ClaudeSDKManager:
                         await client.query(prompt)
 
                     async for raw_data in client._query.receive_messages():
+                        received_raw_message = True
                         try:
                             message = parse_message(raw_data)
                         except MessageParseError as e:
@@ -615,6 +628,7 @@ class ClaudeSDKManager:
                         messages.append(message)
 
                         if isinstance(message, ResultMessage):
+                            received_result = True
                             break
 
                         # Handle streaming callback
@@ -629,6 +643,15 @@ class ClaudeSDKManager:
                                     error=str(callback_error),
                                     error_type=type(callback_error).__name__,
                                 )
+
+                    if not received_result:
+                        # An SDK "end" sentinel (or transport EOF) can close the
+                        # iterator without raising. Retrying is safe only when no
+                        # message was observed; replaying after partial output may
+                        # duplicate tool side effects.
+                        raise _IncompleteMessageStreamError(
+                            retry_safe=not received_raw_message
+                        )
                 finally:
                     await client.disconnect()
 
