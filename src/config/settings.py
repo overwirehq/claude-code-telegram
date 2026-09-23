@@ -22,6 +22,7 @@ from src.utils.constants import (
     DEFAULT_CLAUDE_TIMEOUT_SECONDS,
     DEFAULT_DATABASE_URL,
     DEFAULT_MAX_SESSIONS_PER_USER,
+    DEFAULT_MEDIA_GROUP_BUFFER_TIMEOUT,
     DEFAULT_PROJECT_THREADS_SYNC_ACTION_INTERVAL_SECONDS,
     DEFAULT_RATE_LIMIT_BURST,
     DEFAULT_RATE_LIMIT_REQUESTS,
@@ -299,6 +300,20 @@ class Settings(BaseSettings):
         0.3,
         description="Minimum seconds between draft updates (0.1-5.0)",
         ge=0.1,
+        le=5.0,
+    )
+
+    # Media-group (photo album) buffering
+    media_group_buffer_timeout: float = Field(
+        DEFAULT_MEDIA_GROUP_BUFFER_TIMEOUT,
+        description=(
+            "Seconds to wait for additional photos in a Telegram album before "
+            "sending them to Claude as a single request. Telegram delivers "
+            "album photos as separate Updates that share a media_group_id; "
+            "this debounce coalesces them into one call so the user gets one "
+            "reply instead of N."
+        ),
+        ge=0.3,
         le=5.0,
     )
 

@@ -35,6 +35,7 @@ def mock_settings():
     settings.enable_api_server = False
     settings.enable_scheduler = False
     settings.approved_directory = "/tmp/test"
+    settings.media_group_buffer_timeout = 1.0
     return settings
 
 

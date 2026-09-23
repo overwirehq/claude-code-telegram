@@ -40,6 +40,11 @@ from .utils.image_extractor import (
     should_send_as_photo,
     validate_image_path,
 )
+from .utils.media_group_buffer import (
+    BufferedMediaGroup,
+    MediaGroupBuffer,
+    MediaGroupKey,
+)
 
 logger = structlog.get_logger()
 
@@ -145,6 +150,10 @@ class MessageOrchestrator:
         self._active_requests: Dict[int, ActiveRequest] = {}
         self._pending_tool_approvals: Dict[str, PendingToolApproval] = {}
         self._known_commands: frozenset[str] = frozenset()
+        self._media_group_buffer = MediaGroupBuffer(
+            flush_timeout=settings.media_group_buffer_timeout,
+            on_flush=self._on_media_group_flush,
+        )
 
     def _inject_deps(self, handler: Callable) -> Callable:  # type: ignore[type-arg]
         """Wrap handler to inject dependencies into context.bot_data."""
@@ -1410,14 +1419,75 @@ class MessageOrchestrator:
     async def agentic_photo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Process photo -> Claude, minimal chrome."""
+        """Process photo -> Claude, minimal chrome.
+
+        Photos that belong to a Telegram album (identified by a shared
+        ``media_group_id``) are buffered until all album items have
+        arrived, then sent to Claude as a single request.  Standalone
+        photos are processed immediately.
+        """
         user_id = update.effective_user.id
+        message = update.message
+        if message is None:
+            return
 
         features = context.bot_data.get("features")
         image_handler = features.get_image_handler() if features else None
 
         if not image_handler:
-            await update.message.reply_text("Photo processing is not available.")
+            await message.reply_text("Photo processing is not available.")
+            return
+
+        media_group_id = getattr(message, "media_group_id", None)
+        if media_group_id is not None:
+            # Album — buffer and wait for siblings.
+            chat_id = message.chat.id
+            thread_id = self._extract_message_thread_id(update)
+            key: MediaGroupKey = (user_id, chat_id, thread_id, media_group_id)
+            await self._media_group_buffer.add_photo(
+                key, message.photo[-1], message.caption, update, context
+            )
+            return
+
+        # Standalone photo — process right away.
+        await self._process_photo_batch(
+            update=update,
+            context=context,
+            photos=[message.photo[-1]],
+            caption=message.caption,
+        )
+
+    async def _on_media_group_flush(
+        self, key: MediaGroupKey, result: BufferedMediaGroup
+    ) -> None:
+        """Called by MediaGroupBuffer after the debounce window closes."""
+        logger.info(
+            "Media group flush",
+            user_id=key[0],
+            photo_count=result.photo_count,
+            has_caption=bool(result.caption),
+        )
+        await self._process_photo_batch(
+            update=result.first_update,
+            context=result.last_context,
+            photos=result.photos,
+            caption=result.caption,
+        )
+
+    async def _process_photo_batch(
+        self,
+        *,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        photos: List[Any],
+        caption: Optional[str],
+    ) -> None:
+        """Send *photos* (one or many) to Claude in a single request."""
+        user_id = update.effective_user.id
+        features = context.bot_data.get("features")
+        image_handler = features.get_image_handler() if features else None
+
+        if not image_handler or not photos:
             return
 
         chat = update.message.chat
@@ -1425,22 +1495,39 @@ class MessageOrchestrator:
         progress_msg = await update.message.reply_text("Working...")
 
         try:
-            photo = update.message.photo[-1]
-            processed_image = await image_handler.process_image(
-                photo, update.message.caption
-            )
-            fmt = processed_image.metadata.get("format", "png")
-            images = [
+            # First photo carries the caption so its prompt template is
+            # built with the user's context.  Remaining photos only
+            # contribute image data.
+            first_processed = await image_handler.process_image(photos[0], caption)
+            fmt = first_processed.metadata.get("format", "png")
+            images: List[Dict[str, str]] = [
                 {
-                    "data": processed_image.base64_data,
+                    "data": first_processed.base64_data,
                     "media_type": _MEDIA_TYPE_MAP.get(fmt, "image/png"),
                 }
             ]
+            for photo in photos[1:]:
+                extra = await image_handler.process_image(photo, None)
+                extra_fmt = extra.metadata.get("format", "png")
+                images.append(
+                    {
+                        "data": extra.base64_data,
+                        "media_type": _MEDIA_TYPE_MAP.get(extra_fmt, "image/png"),
+                    }
+                )
+
+            prompt = first_processed.prompt
+            if len(images) > 1:
+                prompt = (
+                    f"{prompt}\n\n"
+                    f"(Attached {len(images)} images in this message — "
+                    f"please consider them together.)"
+                )
 
             await self._handle_agentic_media_message(
                 update=update,
                 context=context,
-                prompt=processed_image.prompt,
+                prompt=prompt,
                 progress_msg=progress_msg,
                 user_id=user_id,
                 chat=chat,
@@ -1452,7 +1539,10 @@ class MessageOrchestrator:
 
             await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
             logger.error(
-                "Claude photo processing failed", error=str(e), user_id=user_id
+                "Claude photo processing failed",
+                error=str(e),
+                user_id=user_id,
+                photo_count=len(photos),
             )
 
     async def agentic_voice(
@@ -1752,6 +1842,11 @@ class MessageOrchestrator:
                 "Only the requesting user can stop this.", show_alert=True
             )
             return
+
+        # Cancel any pending media-group buffer for this user.
+        for buf_key in self._media_group_buffer.pending_keys:
+            if buf_key[0] == target_user_id:
+                self._media_group_buffer.cancel(buf_key)
 
         active = self._active_requests.get(target_user_id)
         if not active:
