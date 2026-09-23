@@ -40,6 +40,7 @@ from .utils.image_extractor import (
     should_send_as_photo,
     validate_image_path,
 )
+from .utils.message_buffer import BufferedResult, BufferKey, MessageBuffer
 
 logger = structlog.get_logger()
 
@@ -145,6 +146,12 @@ class MessageOrchestrator:
         self._active_requests: Dict[int, ActiveRequest] = {}
         self._pending_tool_approvals: Dict[str, PendingToolApproval] = {}
         self._known_commands: frozenset[str] = frozenset()
+        self._user_locks: Dict[int, asyncio.Lock] = {}
+        self._message_buffer = MessageBuffer(
+            chunk_timeout=settings.chunk_buffer_timeout,
+            chunk_threshold=settings.chunk_buffer_threshold,
+            on_flush=self._on_buffer_flush,
+        )
 
     def _inject_deps(self, handler: Callable) -> Callable:  # type: ignore[type-arg]
         """Wrap handler to inject dependencies into context.bot_data."""
@@ -971,10 +978,23 @@ class MessageOrchestrator:
 
         return caption_sent
 
+    def _get_user_lock(self, user_id: int) -> asyncio.Lock:
+        """Return a per-user lock, creating one if needed."""
+        lock = self._user_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._user_locks[user_id] = lock
+        return lock
+
     async def agentic_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Direct Claude passthrough. Simple progress. No suggestions."""
+        """Entry point for text messages in agentic mode.
+
+        Detects Telegram-split chunks (messages near the 4096-char limit)
+        and buffers them before processing.  Short messages bypass the
+        buffer and are processed immediately.
+        """
         user_id = update.effective_user.id
         message_text = update.message.text
 
@@ -984,14 +1004,80 @@ class MessageOrchestrator:
             message_length=len(message_text),
         )
 
-        # Rate limit check
+        # Rate limit check (runs on every chunk — cheap)
         rate_limiter = context.bot_data.get("rate_limiter")
         if rate_limiter:
             allowed, limit_message = await rate_limiter.check_rate_limit(user_id, 0.001)
             if not allowed:
-                await update.message.reply_text(f"⏱️ {limit_message}")
+                await update.message.reply_text(f"\u23f1\ufe0f {limit_message}")
                 return
 
+        # --- Chunk buffering -----------------------------------------------
+        chat_id = update.message.chat.id
+        thread_id = self._extract_message_thread_id(update)
+        buf_key: BufferKey = (user_id, chat_id, thread_id)
+
+        should_buffer = self._message_buffer.has_buffer(
+            buf_key
+        ) or self._message_buffer.is_likely_chunk(
+            message_text, self.settings.chunk_buffer_threshold
+        )
+
+        if should_buffer:
+            result = await self._message_buffer.add_chunk(
+                buf_key, message_text, update, context
+            )
+            if result is None:
+                # Chunk buffered, timer pending.  Return quickly so
+                # the sequential lock is released for the next chunk.
+                return
+            # Buffer flushed (short tail chunk or single non-chunked message).
+            message_text = result.combined_text
+            update = result.first_update
+            context = result.last_context
+            if result.chunk_count > 1:
+                logger.info(
+                    "Chunk buffer flushed inline",
+                    user_id=user_id,
+                    chunk_count=result.chunk_count,
+                    combined_length=len(message_text),
+                )
+
+        # --- Process (may also be called from _on_buffer_flush) ------------
+        lock = self._get_user_lock(user_id)
+        async with lock:
+            await self._process_agentic_text(update, context, message_text)
+
+    async def _on_buffer_flush(self, key: BufferKey, result: BufferedResult) -> None:
+        """Called by MessageBuffer timer when all chunks have been collected.
+
+        Runs as an independent ``asyncio.Task`` — outside the sequential
+        lock but guarded by a per-user lock.
+        """
+        logger.info(
+            "Buffer flush via timer",
+            user_id=key[0],
+            chunk_count=result.chunk_count,
+            combined_length=len(result.combined_text),
+        )
+        lock = self._get_user_lock(key[0])
+        async with lock:
+            await self._process_agentic_text(
+                result.first_update, result.last_context, result.combined_text
+            )
+
+    async def _process_agentic_text(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        message_text: str,
+    ) -> None:
+        """Run *message_text* through Claude and deliver the response.
+
+        Extracted from ``agentic_text`` so it can be called both from the
+        inline handler path and from the timer-fired buffer flush.
+        """
+        user_id = update.effective_user.id
         chat = update.message.chat
         await chat.send_action("typing")
 
@@ -1752,6 +1838,11 @@ class MessageOrchestrator:
                 "Only the requesting user can stop this.", show_alert=True
             )
             return
+
+        # Cancel any pending chunk buffer for this user.
+        for buf_key in self._message_buffer.pending_keys:
+            if buf_key[0] == target_user_id:
+                self._message_buffer.cancel(buf_key)
 
         active = self._active_requests.get(target_user_id)
         if not active:

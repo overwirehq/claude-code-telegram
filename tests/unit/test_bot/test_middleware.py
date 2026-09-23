@@ -35,6 +35,8 @@ def mock_settings():
     settings.enable_api_server = False
     settings.enable_scheduler = False
     settings.approved_directory = "/tmp/test"
+    settings.chunk_buffer_timeout = 0.5
+    settings.chunk_buffer_threshold = 4000
     return settings
 
 
