@@ -37,6 +37,7 @@ from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.html_format import escape_html
 from .utils.image_extractor import (
     ImageAttachment,
+    extract_image_paths_from_text,
     should_send_as_photo,
     validate_image_path,
 )
@@ -1148,8 +1149,18 @@ class MessageOrchestrator:
         except Exception:
             logger.debug("Failed to delete progress message, ignoring")
 
-        # Use MCP-collected images (from send_image_to_user tool calls)
-        images: List[ImageAttachment] = mcp_images
+        # Use MCP-collected images and image paths mentioned in the agent text.
+        images: List[ImageAttachment] = list(mcp_images)
+        if success:
+            extracted_images = extract_image_paths_from_text(
+                claude_response.content,
+                self.settings.approved_directory,
+                current_dir,
+            )
+            known_paths = {img.path for img in images}
+            images.extend(
+                img for img in extracted_images if img.path not in known_paths
+            )
 
         # Try to combine text + images in one message when possible
         caption_sent = False
