@@ -294,3 +294,25 @@ class TestEmptySessionIdWarning:
 
         # Session ID should be empty on the response
         assert not result.session_id
+
+
+class TestEffortPropagation:
+    """Verify the facade preserves an effort override."""
+
+    async def test_run_command_passes_effort_to_execute(self, facade):
+        project = Path("/test/project")
+
+        with patch.object(
+            facade,
+            "_execute",
+            return_value=_make_mock_response(),
+        ) as execute:
+            await facade.run_command(
+                prompt="hello",
+                working_directory=project,
+                user_id=123,
+                force_new=True,
+                effort="high",
+            )
+
+        assert execute.await_args.kwargs["effort"] == "high"

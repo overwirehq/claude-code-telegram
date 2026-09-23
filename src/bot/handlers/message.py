@@ -19,6 +19,7 @@ from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.rate_limiter import RateLimiter
 from ...security.validators import SecurityValidator
+from ..utils.effort import get_effort
 from ..utils.html_format import escape_html
 from ..utils.image_extractor import (
     ImageAttachment,
@@ -393,6 +394,7 @@ async def handle_text_message(
                 session_id=session_id,
                 on_stream=stream_handler,
                 force_new=force_new,
+                effort=get_effort(context),
             )
 
             # New session created successfully — clear the one-shot flag
@@ -818,6 +820,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=session_id,
+                effort=get_effort(context),
             )
 
             # Update session ID
@@ -945,6 +948,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     working_directory=current_dir,
                     user_id=user_id,
                     session_id=session_id,
+                    effort=get_effort(context),
                 )
 
                 # Update session ID
@@ -1073,6 +1077,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=session_id,
+                effort=get_effort(context),
             )
 
             context.user_data["claude_session_id"] = claude_response.session_id

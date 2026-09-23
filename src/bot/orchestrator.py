@@ -1,8 +1,8 @@
 """Message orchestrator — single entry point for all Telegram updates.
 
 Routes messages based on agentic vs classic mode. In agentic mode, provides
-a minimal conversational interface (3 commands, no inline keyboards). In
-classic mode, delegates to existing full-featured handlers.
+a minimal conversational interface without inline keyboards. In classic mode,
+delegates to existing full-featured handlers.
 """
 
 import asyncio
@@ -34,6 +34,7 @@ from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
+from .utils.effort import EFFORT_LEVELS, EFFORT_STATE_KEY, get_effort
 from .utils.html_format import escape_html
 from .utils.image_extractor import (
     ImageAttachment,
@@ -244,6 +245,11 @@ class MessageOrchestrator:
 
         context.user_data["current_directory"] = current_dir
         context.user_data["claude_session_id"] = state.get("claude_session_id")
+        effort = state.get(EFFORT_STATE_KEY)
+        if effort in EFFORT_LEVELS:
+            context.user_data[EFFORT_STATE_KEY] = effort
+        else:
+            context.user_data.pop(EFFORT_STATE_KEY, None)
         context.user_data["_thread_context"] = {
             "chat_id": chat.id,
             "message_thread_id": message_thread_id,
@@ -272,6 +278,7 @@ class MessageOrchestrator:
         thread_states[thread_context["state_key"]] = {
             "current_directory": str(current_dir),
             "claude_session_id": context.user_data.get("claude_session_id"),
+            EFFORT_STATE_KEY: get_effort(context),
             "project_slug": thread_context["project_slug"],
         }
 
@@ -336,6 +343,7 @@ class MessageOrchestrator:
             ("new", self.agentic_new),
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
+            ("effort", command.effort_command),
             ("repo", self.agentic_repo),
             ("restart", command.restart_command),
         ]
@@ -431,6 +439,7 @@ class MessageOrchestrator:
             ("pwd", command.print_working_directory),
             ("projects", command.show_projects),
             ("status", command.session_status),
+            ("effort", command.effort_command),
             ("export", command.export_session),
             ("actions", command.quick_actions),
             ("git", command.git_command),
@@ -467,7 +476,7 @@ class MessageOrchestrator:
             CallbackQueryHandler(self._inject_deps(callback.handle_callback_query))
         )
 
-        logger.info("Classic handlers registered (13 commands + full handler set)")
+        logger.info("Classic handlers registered (15 commands + full handler set)")
 
     async def get_bot_commands(self) -> list:  # type: ignore[type-arg]
         """Return bot commands appropriate for current mode."""
@@ -477,6 +486,7 @@ class MessageOrchestrator:
                 BotCommand("new", "Start a fresh session"),
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
+                BotCommand("effort", "Set Claude reasoning effort"),
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("restart", "Restart the bot"),
             ]
@@ -495,6 +505,7 @@ class MessageOrchestrator:
                 BotCommand("pwd", "Show current directory"),
                 BotCommand("projects", "Show all projects"),
                 BotCommand("status", "Show session status"),
+                BotCommand("effort", "Set Claude reasoning effort"),
                 BotCommand("export", "Export current session"),
                 BotCommand("actions", "Show quick actions"),
                 BotCommand("git", "Git repository commands"),
@@ -555,7 +566,7 @@ class MessageOrchestrator:
             f"Hi {safe_name}! I'm your AI coding assistant.\n"
             f"Just tell me what you need — I can read, write, and run code.\n\n"
             f"Working in: {dir_display}\n"
-            f"Commands: /new (reset) · /status"
+            f"Commands: /new (reset) · /status · /effort"
             f"{sync_line}",
             parse_mode="HTML",
         )
@@ -581,6 +592,7 @@ class MessageOrchestrator:
 
         session_id = context.user_data.get("claude_session_id")
         session_status = "active" if session_id else "none"
+        effort = get_effort(context) or "default"
 
         # Cost info
         cost_str = ""
@@ -595,7 +607,7 @@ class MessageOrchestrator:
                 pass
 
         await update.message.reply_text(
-            f"📂 {dir_display} · Session: {session_status}{cost_str}"
+            f"📂 {dir_display} · Session: {session_status} · Effort: {effort}{cost_str}"
         )
 
     def _get_verbose_level(self, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1083,6 +1095,7 @@ class MessageOrchestrator:
                 force_new=force_new,
                 interrupt_event=interrupt_event,
                 approval_callback=approval_cb,
+                effort=get_effort(context),
             )
 
             # New session created successfully — clear the one-shot flag
@@ -1333,6 +1346,7 @@ class MessageOrchestrator:
                 session_id=session_id,
                 on_stream=on_stream,
                 force_new=force_new,
+                effort=get_effort(context),
             )
 
             if force_new:
@@ -1543,6 +1557,7 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 images=images,
+                effort=get_effort(context),
             )
         finally:
             heartbeat.cancel()

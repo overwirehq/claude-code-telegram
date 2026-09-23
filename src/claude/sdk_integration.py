@@ -24,6 +24,7 @@ from claude_agent_sdk import (
     CLIConnectionError,
     CLIJSONDecodeError,
     CLINotFoundError,
+    EffortLevel,
     Message,
     PermissionResultAllow,
     PermissionResultDeny,
@@ -339,6 +340,7 @@ class ClaudeSDKManager:
         approval_callback: Optional[
             Callable[[str, Dict[str, Any]], Awaitable[bool]]
         ] = None,
+        effort: Optional[EffortLevel] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -439,6 +441,7 @@ class ClaudeSDKManager:
             options = ClaudeAgentOptions(
                 max_turns=self.config.claude_max_turns,
                 model=self.config.claude_model or None,
+                effort=effort,
                 max_budget_usd=self.config.claude_max_cost_per_request,
                 cwd=str(working_directory),
                 allowed_tools=sdk_allowed_tools,

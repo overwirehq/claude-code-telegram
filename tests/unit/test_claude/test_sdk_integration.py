@@ -367,6 +367,44 @@ class TestClaudeSDKManager:
         assert len(captured_options) == 1
         assert captured_options[0].max_budget_usd == config.claude_max_cost_per_request
 
+    async def test_execute_command_passes_effort_override(self, sdk_manager):
+        """A conversation effort override reaches ClaudeAgentOptions."""
+        captured_options = []
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("Test response"),
+            _make_result_message(),
+            capture_options=captured_options,
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+                effort="xhigh",
+            )
+
+        assert captured_options[0].effort == "xhigh"
+
+    async def test_execute_command_leaves_effort_unset_by_default(self, sdk_manager):
+        """Existing callers retain the SDK default when no override is set."""
+        captured_options = []
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("Test response"),
+            _make_result_message(),
+            capture_options=captured_options,
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            await sdk_manager.execute_command(
+                prompt="Test prompt", working_directory=Path("/test")
+            )
+
+        assert captured_options[0].effort is None
+
     async def test_execute_command_no_resume_for_new_session(self, sdk_manager):
         """Test that resume is not set for new sessions."""
         captured_options = []
