@@ -211,6 +211,16 @@ class Settings(BaseSettings):
     max_sessions_per_user: int = Field(
         DEFAULT_MAX_SESSIONS_PER_USER, description="Max concurrent sessions"
     )
+    session_daily_reset_hour: Optional[int] = Field(
+        default=None,
+        description="Hour of day (0-23) to force session reset. None = disabled.",
+        ge=0,
+        le=23,
+    )
+    session_daily_reset_timezone: str = Field(
+        default="UTC",
+        description="Timezone for daily reset hour (e.g. 'Europe/Lisbon')",
+    )
 
     # Features
     enable_mcp: bool = Field(False, description="Enable Model Context Protocol")
