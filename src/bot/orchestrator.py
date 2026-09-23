@@ -33,6 +33,11 @@ from telegram.ext import (
 from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
+from .features.skill_discovery import (
+    DiscoveredSkill,
+    discover_skills,
+    rewrite_skill_command,
+)
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.html_format import escape_html
 from .utils.image_extractor import (
@@ -145,6 +150,18 @@ class MessageOrchestrator:
         self._active_requests: Dict[int, ActiveRequest] = {}
         self._pending_tool_approvals: Dict[str, PendingToolApproval] = {}
         self._known_commands: frozenset[str] = frozenset()
+        self._skills: Dict[str, DiscoveredSkill] = discover_skills(
+            settings.approved_directory
+        )
+
+    def _refresh_skills(self) -> None:
+        """Re-scan skill directories. Called from /new so newly-added skills
+        appear without restarting the bot."""
+        self._skills = discover_skills(self.settings.approved_directory)
+
+    def rewrite_skill_command(self, text: str) -> str:
+        """Undo dash->underscore normalization for discovered skill commands."""
+        return rewrite_skill_command(text, self._skills)
 
     def _inject_deps(self, handler: Callable) -> Callable:  # type: ignore[type-arg]
         """Wrap handler to inject dependencies into context.bot_data."""
@@ -482,6 +499,11 @@ class MessageOrchestrator:
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
+            for skill_name, skill in sorted(self._skills.items()):
+                desc = skill.description[:50]
+                if skill.argument_hint:
+                    desc = f"{desc} ({skill.argument_hint})"
+                commands.append(BotCommand(skill_name, desc[:256]))
             return commands
         else:
             commands = [
@@ -567,6 +589,9 @@ class MessageOrchestrator:
         context.user_data["claude_session_id"] = None
         context.user_data["session_started"] = True
         context.user_data["force_new_session"] = True
+
+        # Re-scan skills so newly-added ones appear without bot restart.
+        self._refresh_skills()
 
         await update.message.reply_text("Session reset. What's next?")
 
@@ -977,6 +1002,11 @@ class MessageOrchestrator:
         """Direct Claude passthrough. Simple progress. No suggestions."""
         user_id = update.effective_user.id
         message_text = update.message.text
+
+        # Telegram only allows [a-z0-9_] in command names, so dashed skills
+        # (e.g. /git-activity) are exposed as /git_activity. Restore the
+        # original dashed form before forwarding to Claude's skill dispatcher.
+        message_text = self.rewrite_skill_command(message_text)
 
         logger.info(
             "Agentic text message",
