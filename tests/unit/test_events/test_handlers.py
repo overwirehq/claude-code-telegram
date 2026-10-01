@@ -1,13 +1,27 @@
 """Tests for event handlers."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
+from src.claude.sdk_integration import ClaudeResponse
 from src.events.bus import EventBus
 from src.events.handlers import AgentHandler
 from src.events.types import AgentResponseEvent, ScheduledEvent, WebhookEvent
+
+
+def _response(**kwargs: object) -> ClaudeResponse:
+    """A real ClaudeResponse -- these paths now read stop-reason fields."""
+    defaults: dict = {
+        "content": "Analysis complete",
+        "session_id": "s1",
+        "cost": 0.0,
+        "duration_ms": 1,
+        "num_turns": 1,
+    }
+    defaults.update(kwargs)
+    return ClaudeResponse(**defaults)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -41,9 +55,7 @@ class TestAgentHandler:
         self, event_bus: EventBus, mock_claude: AsyncMock, agent_handler: AgentHandler
     ) -> None:
         """Webhook events are processed through Claude."""
-        mock_response = MagicMock()
-        mock_response.content = "Analysis complete"
-        mock_claude.run_command.return_value = mock_response
+        mock_claude.run_command.return_value = _response(content="Analysis complete")
 
         published: list = []
         original_publish = event_bus.publish
@@ -76,9 +88,7 @@ class TestAgentHandler:
         self, event_bus: EventBus, mock_claude: AsyncMock, agent_handler: AgentHandler
     ) -> None:
         """Scheduled events invoke Claude with the job's prompt."""
-        mock_response = MagicMock()
-        mock_response.content = "Standup summary"
-        mock_claude.run_command.return_value = mock_response
+        mock_claude.run_command.return_value = _response(content="Standup summary")
 
         published: list = []
         original_publish = event_bus.publish
@@ -108,9 +118,7 @@ class TestAgentHandler:
         self, event_bus: EventBus, mock_claude: AsyncMock, agent_handler: AgentHandler
     ) -> None:
         """Scheduled events with skill_name prepend the skill invocation."""
-        mock_response = MagicMock()
-        mock_response.content = "Done"
-        mock_claude.run_command.return_value = mock_response
+        mock_claude.run_command.return_value = _response(content="Done")
 
         event = ScheduledEvent(
             job_name="standup",

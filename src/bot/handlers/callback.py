@@ -8,12 +8,73 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ...claude.facade import ClaudeIntegration
+from ...claude.sdk_integration import ClaudeResponse
 from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
-from ..utils.html_format import escape_html
+from ..utils.formatting import format_stop_reason
+from ..utils.html_format import escape_html, markdown_to_telegram_html
 
 logger = structlog.get_logger()
+
+# Telegram caps a message at 4096 characters; ResponseFormatter works to 4000
+# for the same reason, so the hand-built callback messages do too.
+MAX_CALLBACK_MESSAGE_LEN = 4000
+TRUNCATION_NOTE = "...\n\n<i>(Response truncated)</i>"
+
+
+def _stop_reason_html(claude_response: ClaudeResponse) -> str:
+    """The stop-reason footer as Telegram HTML, or "" when there is none.
+
+    These two handlers build their message as HTML by hand rather than going
+    through ResponseFormatter, so the footer is converted here instead.
+    """
+    footer = format_stop_reason(claude_response)
+    return markdown_to_telegram_html(footer) if footer else ""
+
+
+def _clip_escaped(body: str, limit: int) -> str:
+    """Clip already-escaped HTML without cutting an entity in half.
+
+    The clip has to happen after escaping, because escaping is what can
+    quintuple the length and blow the budget. But a cut inside ``&amp;``
+    leaves ``&am``, which Telegram rejects outright with "can't parse
+    entities" -- and the handler's except would report a generic failure for
+    the stopped run this footer exists to explain. Every ``&`` here opens an
+    entity, since escape_html escaped the literal ones, so a trailing ``&``
+    with no ``;`` after it is a cut one and goes.
+    """
+    clipped = body[:limit]
+    opener = clipped.rfind("&")
+    if opener != -1 and ";" not in clipped[opener:]:
+        clipped = clipped[:opener]
+    return clipped
+
+
+def _compose_reply(
+    heading: str, claude_response: ClaudeResponse, body_limit: int
+) -> str:
+    """Heading, Claude's reply and its stop-reason footer, within the cap.
+
+    The heading and footer are sized first and the body is clipped to what is
+    left. Appending the footer to an already-clipped body can push the message
+    past Telegram's limit -- HTML escaping alone turns 500 characters of ``&``
+    into 2500 -- and reply_text does not split: the send raises, the handler's
+    except reports a failure, and the run that most needs its stop reason is
+    the one that loses it. The body is what gives, because it is truncated
+    already and the footer cannot be reconstructed from anything else on
+    screen.
+    """
+    footer = _stop_reason_html(claude_response)
+    prefix = f"{heading}\n\n"
+    room = min(body_limit, MAX_CALLBACK_MESSAGE_LEN - len(prefix) - len(footer))
+
+    body = escape_html(claude_response.content)
+    if len(body) > room:
+        body = _clip_escaped(body, max(0, room - len(TRUNCATION_NOTE)))
+        body += TRUNCATION_NOTE
+
+    return f"{prefix}{body}{footer}"
 
 
 def _is_within_root(path: Path, root: Path) -> bool:
@@ -584,10 +645,19 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
             # Update session ID in context
             context.user_data["claude_session_id"] = claude_response.session_id
 
-            # Send Claude's response
+            # The session did continue either way, so the words stay; it is
+            # the tick that would be the false report, sitting above a footer
+            # that says the run was cut short.
+            tick = "✅" if claude_response.completed_normally else "⚠️"
+
+            # This is a preview of a resumed session rather than the reply
+            # itself, so it keeps its short body limit.
             await query.message.reply_text(
-                f"✅ <b>Session Continued</b>\n\n"
-                f"{escape_html(claude_response.content[:500])}{'...' if len(claude_response.content) > 500 else ''}",
+                _compose_reply(
+                    f"{tick} <b>Session Continued</b>",
+                    claude_response,
+                    body_limit=500,
+                ),
                 parse_mode="HTML",
             )
         else:
@@ -924,15 +994,17 @@ async def handle_quick_action_callback(
         )
 
         if claude_response:
-            # Format and send the response
-            response_text = escape_html(claude_response.content)
-            if len(response_text) > 4000:
-                response_text = (
-                    response_text[:4000] + "...\n\n<i>(Response truncated)</i>"
-                )
+            # The heading must not say "Complete" for a run that was cut
+            # short -- that is the same false report as #172, in a header.
+            if claude_response.completed_normally:
+                heading = f"✅ <b>{action.icon} {escape_html(action.name)} Complete</b>"
+            else:
+                heading = f"⚠️ <b>{action.icon} {escape_html(action.name)} Stopped</b>"
 
             await query.message.reply_text(
-                f"✅ <b>{action.icon} {escape_html(action.name)} Complete</b>\n\n{response_text}",
+                _compose_reply(
+                    heading, claude_response, body_limit=MAX_CALLBACK_MESSAGE_LEN
+                ),
                 parse_mode="HTML",
             )
         else:

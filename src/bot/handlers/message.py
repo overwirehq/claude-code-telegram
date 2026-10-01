@@ -12,6 +12,7 @@ from ...security.audit import AuditLogger
 from ...security.rate_limiter import RateLimiter
 from ...security.validators import SecurityValidator
 from ..utils.error_messages import _format_error_message
+from ..utils.formatting import with_stop_reason
 from ..utils.html_format import escape_html
 from ..utils.image_extractor import (
     ImageAttachment,
@@ -222,7 +223,7 @@ async def handle_text_message(
 
             formatter = ResponseFormatter(settings)
             formatted_messages = formatter.format_claude_response(
-                claude_response.content
+                with_stop_reason(claude_response)
             )
 
         except Exception as e:
@@ -630,7 +631,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             formatter = ResponseFormatter(settings)
             formatted_messages = formatter.format_claude_response(
-                claude_response.content
+                with_stop_reason(claude_response)
             )
 
             # Delete progress message
@@ -752,7 +753,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
                 formatter = ResponseFormatter(settings)
                 formatted_messages = formatter.format_claude_response(
-                    claude_response.content
+                    with_stop_reason(claude_response)
                 )
 
                 # Delete progress message
@@ -882,7 +883,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
             formatter = ResponseFormatter(settings)
             formatted_messages = formatter.format_claude_response(
-                claude_response.content
+                with_stop_reason(claude_response)
             )
 
             await progress_msg.delete()

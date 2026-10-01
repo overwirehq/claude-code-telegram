@@ -13,11 +13,14 @@ from claude_agent_sdk import (
     ResultMessage,
     TextBlock,
     ToolPermissionContext,
+    ToolUseBlock,
 )
 from claude_agent_sdk.types import StreamEvent
 
 from src.claude.sdk_integration import (
     GUARDED_TOOLS,
+    TASK_COMPLETED_MSG,
+    TASK_STOPPED_MSG,
     ClaudeResponse,
     ClaudeSDKManager,
     StreamUpdate,
@@ -1698,3 +1701,211 @@ class TestClaudeMdLoading:
 
         opts = captured[0]
         assert opts.setting_sources == ["project"]
+
+
+class TestStopReasonCapture:
+    """ResultMessage stop-reason fields reach ClaudeResponse (#230, #172)."""
+
+    @pytest.fixture
+    def config(self, tmp_path):
+        return Settings(
+            telegram_bot_token="test:token",
+            telegram_bot_username="testbot",
+            approved_directory=tmp_path,
+            claude_timeout_seconds=2,
+        )
+
+    @pytest.fixture
+    def sdk_manager(self, config):
+        return ClaudeSDKManager(config)
+
+    @staticmethod
+    def _tool_use_message(name="Bash"):
+        """An assistant turn that used a tool but produced no text."""
+        return AssistantMessage(
+            content=[ToolUseBlock(id="tool-1", name=name, input={"command": "ls"})],
+            model="claude-sonnet-4-20250514",
+        )
+
+    async def test_success_subtype_still_reports_completion(self, sdk_manager):
+        mock_factory = _mock_client_factory(
+            self._tool_use_message(),
+            _make_result_message(subtype="success", result=None),
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            response = await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert response.content == TASK_COMPLETED_MSG.format(tools_summary="Bash")
+        assert response.result_subtype == "success"
+        assert response.completed_normally is True
+
+    async def test_max_turns_does_not_claim_completion(self, sdk_manager):
+        """A run killed at the turn limit used to report success (#172)."""
+        mock_factory = _mock_client_factory(
+            self._tool_use_message(),
+            _make_result_message(
+                subtype="error_max_turns",
+                is_error=True,
+                result=None,
+                terminal_reason="max_turns",
+                errors=["Reached maximum number of turns"],
+            ),
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            response = await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert TASK_COMPLETED_MSG.format(tools_summary="Bash") not in response.content
+        assert response.content == TASK_STOPPED_MSG.format(tools_summary="Bash")
+        assert response.result_subtype == "error_max_turns"
+        assert response.terminal_reason == "max_turns"
+        assert response.errors == ["Reached maximum number of turns"]
+        assert response.completed_normally is False
+
+    async def test_permission_denials_reach_response(self, sdk_manager):
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("Done what I could"),
+            _make_result_message(
+                result="Done what I could",
+                permission_denials=[
+                    {
+                        "tool_name": "Write",
+                        "tool_use_id": "t1",
+                        "tool_input": {"file_path": "/etc/hosts"},
+                    },
+                    {"toolName": "Bash", "toolInput": {"command": "cd /"}},
+                ],
+            ),
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            response = await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert response.permission_denials == [
+            {"tool_name": "Write", "tool_input": {"file_path": "/etc/hosts"}},
+            {"tool_name": "Bash", "tool_input": {"command": "cd /"}},
+        ]
+        # A denial on its own does not make the run a failure.
+        assert response.completed_normally is True
+
+    async def test_missing_fields_are_tolerated(self, sdk_manager):
+        """Older CLI versions omit the 0.2 fields entirely."""
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("Test response"),
+            _make_result_message(),
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            response = await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert response.stop_reason is None
+        assert response.terminal_reason is None
+        assert response.errors == []
+        assert response.permission_denials == []
+
+    def test_response_defaults_keep_existing_callers_working(self):
+        response = ClaudeResponse(
+            content="hi", session_id="s", cost=0.0, duration_ms=1, num_turns=1
+        )
+        assert response.result_subtype is None
+        assert response.errors == []
+        assert response.permission_denials == []
+        assert response.completed_normally is True
+
+
+class TestNumTurns:
+    """num_turns comes from the CLI, not from counting messages."""
+
+    @pytest.fixture
+    def config(self, tmp_path):
+        return Settings(
+            telegram_bot_token="test:token",
+            telegram_bot_username="testbot",
+            approved_directory=tmp_path,
+            claude_timeout_seconds=2,
+        )
+
+    @pytest.fixture
+    def sdk_manager(self, config):
+        return ClaudeSDKManager(config)
+
+    async def test_result_message_wins_over_the_message_count(self, sdk_manager):
+        """Every tool result arrives as another UserMessage, so counting
+        messages over-reports the turns -- and the stop-reason footer shows
+        that number to the user."""
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("one"),
+            _make_assistant_message("two"),
+            _make_assistant_message("three"),
+            _make_result_message(num_turns=10, subtype="error_max_turns"),
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            response = await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert response.num_turns == 10
+
+    async def test_zero_turns_is_taken_at_face_value(self, sdk_manager):
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("one"),
+            _make_result_message(num_turns=0),
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            response = await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert response.num_turns == 0
+
+    async def test_falls_back_to_counting_when_the_cli_reports_nothing(
+        self, sdk_manager
+    ):
+        """An older CLI, or a result that never reached the query loop."""
+        result = _make_result_message()
+        del result.num_turns
+
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("one"),
+            _make_assistant_message("two"),
+            result,
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            response = await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert response.num_turns == 2

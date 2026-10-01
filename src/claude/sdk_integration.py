@@ -54,6 +54,60 @@ logger = structlog.get_logger()
 # Fallback message when Claude produces no text but did use tools.
 TASK_COMPLETED_MSG = "✅ Task completed. Tools used: {tools_summary}"
 
+# Fallback message when a run stopped early without producing any text. The
+# stop-reason footer carries the warning and the reason, so this only reports
+# what the run got done -- otherwise the two stack up as "stopped" twice.
+TASK_STOPPED_MSG = "No final response. Tools used: {tools_summary}"
+
+# ResultMessage.subtype reported by the CLI for a run that ran to completion.
+RESULT_SUBTYPE_SUCCESS = "success"
+
+
+def _as_error_list(value: Any) -> List[str]:
+    """Normalise ResultMessage.errors into a list of strings."""
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    return [str(value)]
+
+
+def _as_denial_list(value: Any) -> List[Dict[str, Any]]:
+    """Normalise ResultMessage.permission_denials into a list of dicts.
+
+    The SDK types this ``list[Any]`` and passes the CLI payload through
+    untouched, so accept both snake_case and camelCase keys and tolerate
+    entries that are not dicts at all.
+    """
+    if not value or not isinstance(value, list):
+        return []
+
+    denials: List[Dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            tool_name = item.get("tool_name") or item.get("toolName")
+            tool_input = item.get("tool_input")
+            if tool_input is None:
+                tool_input = item.get("toolInput")
+            denials.append(
+                {
+                    "tool_name": str(tool_name) if tool_name else "unknown",
+                    "tool_input": tool_input if isinstance(tool_input, dict) else {},
+                }
+            )
+        else:
+            name = getattr(item, "tool_name", None)
+            tool_input = getattr(item, "tool_input", None)
+            denials.append(
+                {
+                    "tool_name": str(name) if name else "unknown",
+                    "tool_input": tool_input if isinstance(tool_input, dict) else {},
+                }
+            )
+    return denials
+
 
 @dataclass
 class ClaudeResponse:
@@ -68,6 +122,23 @@ class ClaudeResponse:
     error_type: Optional[str] = None
     tools_used: List[Dict[str, Any]] = field(default_factory=list)
     interrupted: bool = False
+    # Why the run ended.  All optional so existing construction sites keep
+    # working; populated from ResultMessage when the SDK reports them.
+    result_subtype: Optional[str] = None
+    stop_reason: Optional[str] = None
+    terminal_reason: Optional[str] = None
+    errors: List[str] = field(default_factory=list)
+    permission_denials: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def completed_normally(self) -> bool:
+        """Whether the run reached its own end rather than being cut short.
+
+        ``None`` means the CLI reported no subtype at all (older versions, or a
+        result that bypassed the query loop), which we treat as normal so that
+        nothing regresses into a spurious warning.
+        """
+        return self.result_subtype in (None, RESULT_SUBTYPE_SUCCESS)
 
 
 @dataclass
@@ -640,16 +711,32 @@ class ClaudeSDKManager:
                 if last_exc is not None:
                     raise last_exc
 
-            # Extract cost, tools, and session_id from result message
+            # Extract cost, tools, session_id and stop reason from result message
             cost = 0.0
             tools_used: List[Dict[str, Any]] = []
             claude_session_id = None
             result_content = None
+            result_subtype: Optional[str] = None
+            result_num_turns: Optional[int] = None
+            stop_reason: Optional[str] = None
+            terminal_reason: Optional[str] = None
+            result_errors: List[str] = []
+            permission_denials: List[Dict[str, Any]] = []
             for message in messages:
                 if isinstance(message, ResultMessage):
                     cost = getattr(message, "total_cost_usd", 0.0) or 0.0
                     claude_session_id = getattr(message, "session_id", None)
                     result_content = getattr(message, "result", None)
+                    # getattr (not attribute access) throughout: older CLI
+                    # versions and the test doubles omit these fields.
+                    result_subtype = getattr(message, "subtype", None)
+                    result_num_turns = getattr(message, "num_turns", None)
+                    stop_reason = getattr(message, "stop_reason", None)
+                    terminal_reason = getattr(message, "terminal_reason", None)
+                    result_errors = _as_error_list(getattr(message, "errors", None))
+                    permission_denials = _as_denial_list(
+                        getattr(message, "permission_denials", None)
+                    )
                     current_time = asyncio.get_event_loop().time()
                     for msg in messages:
                         if isinstance(msg, AssistantMessage):
@@ -710,6 +797,8 @@ class ClaudeSDKManager:
                             content_parts.append(str(msg_content))
                 content = "\n".join(content_parts).strip()
 
+            ran_to_completion = result_subtype in (None, RESULT_SUBTYPE_SUCCESS)
+
             if not content and tools_used:
                 tool_names = [
                     tool.get("name", "")
@@ -718,22 +807,54 @@ class ClaudeSDKManager:
                 ]
                 unique_tool_names = list(dict.fromkeys(tool_names))
                 tools_summary = ", ".join(unique_tool_names) or "unknown"
-                content = TASK_COMPLETED_MSG.format(tools_summary=tools_summary)
+                # Only claim completion when the CLI says the run completed.
+                # A run killed at the turn limit takes this same path (tools
+                # ran, no final text) and must not report success (#172).
+                template = TASK_COMPLETED_MSG if ran_to_completion else TASK_STOPPED_MSG
+                content = template.format(tools_summary=tools_summary)
+
+            # The CLI reports the authoritative turn count. Counting messages
+            # over-reports it -- every tool result arrives as another
+            # UserMessage -- and that number is now shown to the user in the
+            # stop-reason footer, so the approximation is only a fallback for
+            # a result that did not carry one.
+            if isinstance(result_num_turns, int) and result_num_turns >= 0:
+                num_turns = result_num_turns
+            else:
+                num_turns = len(
+                    [
+                        m
+                        for m in messages
+                        if isinstance(m, (UserMessage, AssistantMessage))
+                    ]
+                )
+
+            if not ran_to_completion or permission_denials or result_errors:
+                logger.info(
+                    "Claude run did not end cleanly",
+                    result_subtype=result_subtype,
+                    stop_reason=stop_reason,
+                    terminal_reason=terminal_reason,
+                    permission_denials=len(permission_denials),
+                    denied_tools=[d["tool_name"] for d in permission_denials],
+                    errors=result_errors,
+                    num_turns=num_turns,
+                    session_id=final_session_id,
+                )
 
             return ClaudeResponse(
                 content=content,
                 session_id=final_session_id,
                 cost=cost,
                 duration_ms=duration_ms,
-                num_turns=len(
-                    [
-                        m
-                        for m in messages
-                        if isinstance(m, (UserMessage, AssistantMessage))
-                    ]
-                ),
+                num_turns=num_turns,
                 tools_used=tools_used,
                 interrupted=interrupted,
+                result_subtype=result_subtype,
+                stop_reason=stop_reason,
+                terminal_reason=terminal_reason,
+                errors=result_errors,
+                permission_denials=permission_denials,
             )
 
         except asyncio.TimeoutError:

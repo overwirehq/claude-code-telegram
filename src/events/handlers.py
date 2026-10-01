@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Set
 
 import structlog
 
+from ..bot.utils.formatting import with_stop_reason
 from ..claude.facade import ClaudeIntegration
 from .bus import Event, EventBus
 from .types import AgentResponseEvent, ScheduledEvent, WebhookEvent
@@ -65,7 +66,11 @@ class AgentHandler:
                 user_id=self.default_user_id,
             )
 
-            if response.content:
+            # Nobody is watching a webhook run, so the reason it stopped is
+            # the whole of what the notification can say about it (#172).
+            text = with_stop_reason(response)
+
+            if text:
                 # We don't know which chat to send to from a webhook alone.
                 # The notification service needs configured target chats.
                 # Publish with chat_id=0 — the NotificationService
@@ -73,7 +78,7 @@ class AgentHandler:
                 await self.event_bus.publish(
                     AgentResponseEvent(
                         chat_id=0,
-                        text=response.content,
+                        text=text,
                         originating_event_id=event.id,
                     )
                 )
@@ -122,12 +127,14 @@ class AgentHandler:
                 user_id=self.default_user_id,
             )
 
-            if response.content:
+            text = with_stop_reason(response)
+
+            if text:
                 for chat_id in event.target_chat_ids:
                     await self.event_bus.publish(
                         AgentResponseEvent(
                             chat_id=chat_id,
-                            text=response.content,
+                            text=text,
                             originating_event_id=event.id,
                         )
                     )
@@ -137,7 +144,7 @@ class AgentHandler:
                     await self.event_bus.publish(
                         AgentResponseEvent(
                             chat_id=0,
-                            text=response.content,
+                            text=text,
                             originating_event_id=event.id,
                         )
                     )
