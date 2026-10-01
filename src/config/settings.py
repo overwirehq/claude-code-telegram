@@ -302,6 +302,32 @@ class Settings(BaseSettings):
         le=5.0,
     )
 
+    # Message chunk buffering (multi-part paste detection)
+    chunk_buffer_timeout: float = Field(
+        0.5,
+        description=(
+            "Seconds to wait for additional message chunks before processing. "
+            "Applies when a pasted message exceeds Telegram's 4096-char limit."
+        ),
+        ge=0.1,
+        le=3.0,
+    )
+    chunk_buffer_threshold: int = Field(
+        3000,
+        description=(
+            "Minimum message length (chars) to trigger chunk buffering. "
+            "Messages shorter than this are never buffered. "
+            "Telegram clients often split long pastes at paragraph/line "
+            "boundaries rather than at the 4096-char hard limit, so chunks "
+            "can arrive well below 4000 chars — the default of 3000 catches "
+            "those splits. Lower this further if you see multi-part pastes "
+            "slipping through; raise it if you often send single long "
+            "messages that don't need buffering."
+        ),
+        ge=2000,
+        le=4096,
+    )
+
     # Monitoring
     log_level: str = Field("INFO", description="Logging level")
     enable_telemetry: bool = Field(False, description="Enable anonymous telemetry")
