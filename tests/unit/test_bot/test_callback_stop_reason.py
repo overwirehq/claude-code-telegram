@@ -204,6 +204,51 @@ class TestComposeReply:
         assert "8 tool calls were blocked" in text
 
 
+class TestTheFooterCannotOverflowOnItsOwn:
+    """_compose_reply sizes the body against the footer, so an unbounded
+    footer drives its budget negative and the whole send fails -- losing the
+    report for exactly the run it exists to explain."""
+
+    TELEGRAM_LIMIT = 4096
+
+    def test_a_long_tool_name_does_not_overflow(self):
+        text = _compose_reply(
+            "<b>H</b>",
+            _response(
+                result_subtype="success",
+                permission_denials=[{"tool_name": "m" * 5000, "tool_input": {}}],
+            ),
+            body_limit=500,
+        )
+
+        assert len(text) <= self.TELEGRAM_LIMIT
+
+    def test_an_unrecognised_subtype_does_not_overflow(self):
+        text = _compose_reply(
+            "<b>H</b>", _response(result_subtype="e" * 5000), body_limit=500
+        )
+
+        assert len(text) <= self.TELEGRAM_LIMIT
+
+    def test_everything_unbounded_at_once_does_not_overflow(self):
+        text = _compose_reply(
+            "<b>H</b>",
+            _response(
+                content="x" * 10000,
+                result_subtype="e" * 5000,
+                errors=["y" * 5000],
+                permission_denials=[
+                    {"tool_name": "m" * 5000, "tool_input": {"command": "c" * 5000}}
+                    for _ in range(8)
+                ],
+            ),
+            body_limit=500,
+        )
+
+        assert len(text) <= self.TELEGRAM_LIMIT
+        assert "8 tool calls were blocked" in text
+
+
 async def _run_continue_action(claude_response, tmp_path):
     """Drive _handle_continue_action and return the text it replied with."""
     claude_integration = AsyncMock()

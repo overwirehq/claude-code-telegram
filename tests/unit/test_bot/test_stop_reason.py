@@ -1,6 +1,8 @@
 """Tests for the footer that says why a Claude run stopped (#230, #172)."""
 
 from src.bot.utils.formatting import (
+    DENIAL_NAME_MAX_LEN,
+    STOP_VALUE_MAX_LEN,
     format_permission_denials,
     format_stop_reason,
     with_stop_reason,
@@ -72,6 +74,19 @@ class TestFormatStopReason:
 
         assert footer is not None
         assert "error_brand_new" in footer
+
+    def test_an_unbounded_raw_value_is_clipped(self):
+        """Both fields are bare strings from the CLI with nothing capping them.
+
+        The footer has to fit inside a Telegram message however long the value
+        the CLI sends is, or the send fails and takes the stop reason with it.
+        """
+        footer = format_stop_reason(_response(result_subtype="e" * 5000))
+
+        assert footer is not None
+        assert len(footer) < 200
+        assert "…" in footer
+        assert "e" * STOP_VALUE_MAX_LEN not in footer
 
     def test_terminal_reason_wins_over_an_unknown_subtype(self):
         footer = format_stop_reason(
@@ -198,6 +213,31 @@ class TestFormatPermissionDenials:
         assert line is not None
         assert "Write(`/etc/hosts`)" in line
         assert "6 tool calls were blocked" in line
+
+    def test_a_long_tool_name_is_clipped(self):
+        """Only the argument was capped, so the name could overflow the message.
+
+        An MCP tool name carries its server, and nothing bounds what the CLI
+        reports; a 5000-character one pushed the composed reply to 5071
+        characters against Telegram's 4096 cap, so the send raised and the
+        footer that exists to explain the run was the thing that got lost.
+        """
+        line = format_permission_denials(
+            [{"tool_name": "mcp__s__" + "t" * 5000, "tool_input": {"path": "/x"}}]
+        )
+
+        assert line is not None
+        assert len(line) < 150
+        assert line.endswith("(`/x`)"), "the argument still survives"
+        assert "…" in line
+
+    def test_a_real_mcp_tool_name_is_left_whole(self):
+        name = "mcp__some_server__a_fairly_long_tool_name"
+        assert len(name) <= DENIAL_NAME_MAX_LEN
+
+        line = format_permission_denials([{"tool_name": name, "tool_input": {}}])
+
+        assert line == f"🚫 1 tool call was blocked: {name}"
 
     def test_missing_tool_name_falls_back(self):
         line = format_permission_denials([{"tool_input": {"file_path": "/x"}}])

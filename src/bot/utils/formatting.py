@@ -15,8 +15,14 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard, typing only
 
 # Longest tool argument shown inside the blocked-calls list.
 DENIAL_ARG_MAX_LEN = 40
+# Longest tool name shown in the blocked-calls list. An MCP tool name carries
+# its server (`mcp__some_server__some_tool`), so this is generous enough to
+# leave a real one whole, and the CLI's value is not otherwise bounded.
+DENIAL_NAME_MAX_LEN = 60
 # Blocked calls listed in full before the rest are summarised as "and N more".
 DENIAL_LIST_MAX = 5
+# Longest raw subtype or terminal reason echoed into the generic stop clause.
+STOP_VALUE_MAX_LEN = 40
 # Longest CLI error string echoed into the footer.
 STOP_DETAIL_MAX_LEN = 200
 # Shown in place of a stop reason when the user pressed Stop themselves.
@@ -116,7 +122,7 @@ def format_permission_denials(denials: List[Dict[str, Any]]) -> Optional[str]:
 
     described: List[str] = []
     for denial in usable[:DENIAL_LIST_MAX]:
-        name = str(denial.get("tool_name") or "unknown")
+        name = _shorten(str(denial.get("tool_name") or "unknown"), DENIAL_NAME_MAX_LEN)
         argument = _denial_argument(denial.get("tool_input") or {})
         described.append(f"{name}({_inline_code(argument)})" if argument else name)
 
@@ -158,7 +164,11 @@ def format_stop_reason(response: "ClaudeResponse") -> Optional[str]:
             subtype
         )
         if reason is None:
-            reason = f"the run ended early ({subtype or terminal or 'unknown reason'})"
+            # Both are bare `str | None` from the CLI with no enum behind them,
+            # so an unrecognised value is named -- and clipped, because the
+            # footer has to fit in a Telegram message whatever the CLI sends.
+            raw = _shorten(subtype or terminal or "unknown reason", STOP_VALUE_MAX_LEN)
+            reason = f"the run ended early ({raw})"
 
         sentence = f"⚠️ Stopped: {reason}"
         if response.num_turns:
