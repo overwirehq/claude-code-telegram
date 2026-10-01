@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -39,10 +40,35 @@ class ClaudeSession:
     tools_used: List[str] = field(default_factory=list)
     is_new_session: bool = False  # True if session hasn't been sent to Claude Code yet
 
-    def is_expired(self, timeout_hours: int) -> bool:
-        """Check if session has expired."""
-        age = datetime.now(UTC) - _to_utc(self.last_used)
-        return age > timedelta(hours=timeout_hours)
+    def is_expired(
+        self,
+        timeout_hours: int,
+        daily_reset_hour: Optional[int] = None,
+        daily_reset_tz: str = "UTC",
+    ) -> bool:
+        """Check if session has expired.
+
+        Expires if age exceeds timeout_hours OR if the session spans
+        the daily reset boundary (e.g. 3:00 AM local time).
+        """
+        now = datetime.now(UTC)
+        age = now - _to_utc(self.last_used)
+        if age > timedelta(hours=timeout_hours):
+            return True
+
+        if daily_reset_hour is not None:
+            tz = ZoneInfo(daily_reset_tz)
+            now_local = now.astimezone(tz)
+            today_reset = now_local.replace(
+                hour=daily_reset_hour, minute=0, second=0, microsecond=0
+            )
+            if now_local < today_reset:
+                today_reset -= timedelta(days=1)
+            last_used_local = _to_utc(self.last_used).astimezone(tz)
+            if last_used_local < today_reset:
+                return True
+
+        return False
 
     def update_usage(self, response: ClaudeResponse) -> None:
         """Update session with usage from response."""
@@ -123,6 +149,14 @@ class SessionManager:
         self.storage = storage
         self.active_sessions: Dict[str, ClaudeSession] = {}
 
+    def _is_session_expired(self, session: ClaudeSession) -> bool:
+        """Check if session is expired using all configured rules."""
+        return session.is_expired(
+            self.config.session_timeout_hours,
+            daily_reset_hour=self.config.session_daily_reset_hour,
+            daily_reset_tz=self.config.session_daily_reset_timezone,
+        )
+
     async def get_or_create_session(
         self,
         user_id: int,
@@ -147,14 +181,14 @@ class SessionManager:
                     session_owner=session.user_id,
                     requesting_user=user_id,
                 )
-            elif not session.is_expired(self.config.session_timeout_hours):
+            elif not self._is_session_expired(session):
                 logger.debug("Using active session", session_id=session_id)
                 return session
 
         # Try to load from storage (filtered by user_id)
         if session_id:
             session = await self.storage.load_session(session_id, user_id)
-            if session and not session.is_expired(self.config.session_timeout_hours):
+            if session and not self._is_session_expired(session):
                 self.active_sessions[session_id] = session
                 logger.info("Loaded session from storage", session_id=session_id)
                 return session
@@ -244,7 +278,7 @@ class SessionManager:
         expired_count = 0
 
         for session in all_sessions:
-            if session.is_expired(self.config.session_timeout_hours):
+            if self._is_session_expired(session):
                 await self.remove_session(session.session_id)
                 expired_count += 1
 
@@ -281,7 +315,7 @@ class SessionManager:
                 "turns": session.total_turns,
                 "messages": session.message_count,
                 "tools_used": session.tools_used,
-                "expired": session.is_expired(self.config.session_timeout_hours),
+                "expired": self._is_session_expired(session),
             }
 
         return None
@@ -293,7 +327,7 @@ class SessionManager:
         total_cost = sum(s.total_cost for s in sessions)
         total_messages = sum(s.message_count for s in sessions)
         active_sessions = [
-            s for s in sessions if not s.is_expired(self.config.session_timeout_hours)
+            s for s in sessions if not self._is_session_expired(s)
         ]
 
         return {

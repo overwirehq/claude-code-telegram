@@ -200,7 +200,7 @@ class ClaudeIntegration:
             for s in sessions
             if s.project_path == working_directory
             and bool(s.session_id)
-            and not s.is_expired(self.config.session_timeout_hours)
+            and not self.session_manager._is_session_expired(s)
         ]
 
         if not matching_sessions:
@@ -268,7 +268,7 @@ class ClaudeIntegration:
                 "total_cost": s.total_cost,
                 "message_count": s.message_count,
                 "tools_used": s.tools_used,
-                "expired": s.is_expired(self.config.session_timeout_hours),
+                "expired": self.session_manager._is_session_expired(s),
             }
             for s in sessions
         ]
