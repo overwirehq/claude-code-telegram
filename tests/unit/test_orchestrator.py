@@ -182,7 +182,7 @@ async def test_restart_command_sends_sigterm(deps):
     """restart_command sends SIGTERM to the current process."""
     from unittest.mock import patch
 
-    from src.bot.handlers.command import restart_command
+    from src.bot.commands import restart_command
 
     update = MagicMock()
     update.effective_user.id = 123
@@ -191,7 +191,7 @@ async def test_restart_command_sends_sigterm(deps):
     context = MagicMock()
     context.bot_data = {"audit_logger": None}
 
-    with patch("src.bot.handlers.command.os.kill") as mock_kill:
+    with patch("src.bot.commands.os.kill") as mock_kill:
         await restart_command(update, context)
 
     import os

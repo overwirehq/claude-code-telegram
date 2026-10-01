@@ -71,6 +71,8 @@ context.bot_data["security_validator"]
 - `src/bot/middleware/` -- Auth, rate limit, security input validation
 - `src/bot/features/` -- Git integration, file handling, quick actions, session export
 - `src/bot/orchestrator.py` -- MessageOrchestrator: routes to agentic or classic handlers, project-topic routing
+- `src/bot/commands.py` -- commands both modes register (`/restart`, `/sync_threads`); not classic-mode code
+- `src/bot/utils/` -- formatting, HTML escaping, image extraction, error rendering (`error_messages.py`), working-directory tracking (`working_directory.py`), shared by both modes
 - `src/claude/` -- Claude integration facade, SDK/CLI managers, session management, tool monitoring
 - `src/projects/` -- Multi-project support: `registry.py` (YAML project config), `thread_manager.py` (Telegram topic sync/routing)
 - `src/storage/` -- SQLite via aiosqlite, repository pattern (users, sessions, messages, tool_usage, audit_log, cost_tracking, project_threads)
@@ -138,6 +140,8 @@ Agentic mode commands: `/start`, `/new`, `/status`, `/verbose`, `/repo`. If `ENA
 4. Add audit logging for the command
 
 ### Classic mode
+
+Classic mode is scheduled for removal in 2.0 (roadmap item 4.1). Agentic code must not import from `src/bot/handlers/`: anything both modes need lives in `src/bot/commands.py` or `src/bot/utils/`, and `tests/unit/test_bot/test_agentic_imports.py` fails if `orchestrator.py` gains another `from .handlers` import.
 
 1. Add handler function in `src/bot/handlers/command.py`
 2. Register in `MessageOrchestrator._register_classic_handlers()`
