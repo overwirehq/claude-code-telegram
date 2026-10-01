@@ -218,6 +218,26 @@ class TestClaudeSDKManager:
 
         assert response.content == "Extracted from messages"
 
+    @pytest.mark.parametrize("empty_result", ["", "  \n"])
+    async def test_execute_command_falls_back_when_result_is_empty(
+        self, sdk_manager, empty_result
+    ):
+        """Empty provider results must not hide AssistantMessage text (#171)."""
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("OpenRouter response"),
+            _make_result_message(result=empty_result),
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            response = await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert response.content == "OpenRouter response"
+
     async def test_execute_command_with_streaming(self, sdk_manager):
         """Test command execution with streaming callback."""
         stream_updates = []
