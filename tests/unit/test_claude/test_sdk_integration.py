@@ -218,6 +218,26 @@ class TestClaudeSDKManager:
 
         assert response.content == "Extracted from messages"
 
+    @pytest.mark.parametrize("empty_result", ["", "  \n"])
+    async def test_execute_command_falls_back_when_result_is_empty(
+        self, sdk_manager, empty_result
+    ):
+        """Empty provider results must not hide AssistantMessage text (#171)."""
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("OpenRouter response"),
+            _make_result_message(result=empty_result),
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            response = await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert response.content == "OpenRouter response"
+
     async def test_execute_command_with_streaming(self, sdk_manager):
         """Test command execution with streaming callback."""
         stream_updates = []
@@ -406,7 +426,7 @@ class TestClaudeSDKManager:
             if call_count == 1:
                 raise CLIConnectionError("connection reset")
             # Second attempt succeeds - yield a ResultMessage
-            yield
+            yield _make_result_message()
 
         # Use a config with 2 attempts
         sdk_manager.config.claude_retry_max_attempts = 2
@@ -419,17 +439,75 @@ class TestClaudeSDKManager:
         query_mock.receive_messages = flaky_receive
         client._query = query_mock
 
-        # Should not raise - second attempt succeeds
         with patch("src.claude.sdk_integration.ClaudeSDKClient", return_value=client):
             with patch("asyncio.sleep", new_callable=AsyncMock):
-                try:
-                    await sdk_manager.execute_command(
-                        prompt="Test",
-                        working_directory=Path("/test"),
-                    )
-                except Exception:
-                    pass  # Response parsing may fail - what matters is retry happened
+                response = await sdk_manager.execute_command(
+                    prompt="Test",
+                    working_directory=Path("/test"),
+                )
+
         assert call_count == 2
+        assert response.content == "Success"
+
+    async def test_retry_when_stream_ends_before_any_message(self, sdk_manager):
+        """A clean EOF without ResultMessage is a retryable transport failure."""
+        call_count = 0
+
+        async def flaky_receive():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return
+            yield _make_assistant_message("Recovered response")
+            yield _make_result_message(result="Recovered response")
+
+        sdk_manager.config.claude_retry_max_attempts = 2
+        client = AsyncMock()
+        client.connect = AsyncMock()
+        client.disconnect = AsyncMock()
+        client.query = AsyncMock()
+        query_mock = AsyncMock()
+        query_mock.receive_messages = flaky_receive
+        client._query = query_mock
+
+        with patch("src.claude.sdk_integration.ClaudeSDKClient", return_value=client):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                response = await sdk_manager.execute_command(
+                    prompt="Test",
+                    working_directory=Path("/test"),
+                )
+
+        assert call_count == 2
+        assert response.content == "Recovered response"
+
+    async def test_does_not_replay_after_partial_stream(self, sdk_manager):
+        """Partial output may include tool side effects and must not be replayed."""
+        from src.claude.exceptions import ClaudeProcessError
+
+        call_count = 0
+
+        async def partial_receive():
+            nonlocal call_count
+            call_count += 1
+            yield _make_assistant_message("Partial response")
+
+        sdk_manager.config.claude_retry_max_attempts = 3
+        client = AsyncMock()
+        client.connect = AsyncMock()
+        client.disconnect = AsyncMock()
+        client.query = AsyncMock()
+        query_mock = AsyncMock()
+        query_mock.receive_messages = partial_receive
+        client._query = query_mock
+
+        with patch("src.claude.sdk_integration.ClaudeSDKClient", return_value=client):
+            with pytest.raises(ClaudeProcessError, match="before ResultMessage"):
+                await sdk_manager.execute_command(
+                    prompt="Test",
+                    working_directory=Path("/test"),
+                )
+
+        assert call_count == 1
 
     async def test_no_retry_on_mcp_connection_error(self, sdk_manager):
         """Test that MCP CLIConnectionError is NOT retried."""
