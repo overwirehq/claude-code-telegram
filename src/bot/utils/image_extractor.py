@@ -5,6 +5,7 @@ validates each path via :func:`validate_image_path` and collects
 :class:`ImageAttachment` objects for later Telegram delivery.
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -31,6 +32,20 @@ TELEGRAM_PHOTO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_IMAGES_PER_RESPONSE = 10
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 PHOTO_SIZE_LIMIT = 10 * 1024 * 1024  # 10 MB — Telegram photo API limit
+
+_IMAGE_EXT_PATTERN = "png|jpe?g|gif|webp|bmp|svg"
+_ABSOLUTE_IMAGE_RE = re.compile(
+    rf"(?P<path>/[^\s`<>\"']+?\.(?:{_IMAGE_EXT_PATTERN}))",
+    re.IGNORECASE,
+)
+_QUOTED_IMAGE_RE = re.compile(
+    rf"[`'\"](?P<path>[^`'\"]+?\.(?:{_IMAGE_EXT_PATTERN}))[`'\"]",
+    re.IGNORECASE,
+)
+_BARE_IMAGE_RE = re.compile(
+    rf"(?<![\w/.-])(?P<path>[\w./-]+\.(?:{_IMAGE_EXT_PATTERN}))(?![\w/.-])",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -91,6 +106,71 @@ def validate_image_path(
     except (OSError, ValueError) as e:
         logger.debug("MCP image path validation failed", path=file_path, error=str(e))
         return None
+
+
+def extract_image_paths_from_text(
+    text: str,
+    approved_directory: Path,
+    working_directory: Path,
+    limit: int = MAX_IMAGES_PER_RESPONSE,
+) -> list[ImageAttachment]:
+    """Extract existing image paths from agent text for Telegram delivery.
+
+    OpenCode may answer with a path like ``/workspace/foo.png`` or simply
+    ``foo.png``. Only existing image files inside *approved_directory* are
+    returned. Bare filenames are resolved relative to *working_directory*, then
+    searched recursively under it as a convenience for prompts like "send it".
+    """
+    if not text.strip():
+        return []
+
+    approved_directory = approved_directory.resolve()
+    working_directory = working_directory.resolve()
+    candidates: list[str] = []
+
+    for regex in (_ABSOLUTE_IMAGE_RE, _QUOTED_IMAGE_RE, _BARE_IMAGE_RE):
+        for match in regex.finditer(text):
+            candidate = match.group("path").strip().rstrip(".,;:)]}")
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
+    images: list[ImageAttachment] = []
+    seen: set[Path] = set()
+
+    def add_candidate(path: Path, reference: str) -> None:
+        if len(images) >= limit:
+            return
+        img = validate_image_path(str(path), approved_directory, reference)
+        if img and img.path not in seen:
+            seen.add(img.path)
+            images.append(img)
+
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.is_absolute():
+            add_candidate(path, candidate)
+            continue
+
+        direct_path = working_directory / path
+        add_candidate(direct_path, candidate)
+        if len(images) >= limit:
+            break
+
+        if path.parent == Path(".") and not direct_path.is_file():
+            try:
+                for match in working_directory.rglob(path.name):
+                    add_candidate(match, candidate)
+                    if len(images) >= limit:
+                        break
+            except OSError as e:
+                logger.debug(
+                    "Image filename search failed",
+                    filename=path.name,
+                    working_directory=str(working_directory),
+                    error=str(e),
+                )
+
+    return images
 
 
 def should_send_as_photo(path: Path) -> bool:
