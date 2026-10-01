@@ -91,5 +91,10 @@ DEFAULT_RETRY_BASE_DELAY = 1.0
 DEFAULT_RETRY_BACKOFF_FACTOR = 3.0
 DEFAULT_RETRY_MAX_DELAY = 30.0
 
+# Media-group (photo album) buffering. Telegram delivers album photos as
+# separate Updates sharing a media_group_id; we debounce them into a
+# single Claude request.
+DEFAULT_MEDIA_GROUP_BUFFER_TIMEOUT = 1.0
+
 # Logging
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
