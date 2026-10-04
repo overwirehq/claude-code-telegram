@@ -3,7 +3,7 @@
 import asyncio
 import os
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from claude_agent_sdk import (
@@ -1189,7 +1189,9 @@ class TestCanUseToolCallback:
         )
         assert isinstance(result, PermissionResultAllow)
         approval_callback.assert_awaited_once_with(
-            "Bash", {"command": f"mkdir -p {approved_dir}/subdir"}
+            "Bash",
+            {"command": f"mkdir -p {approved_dir}/subdir"},
+            context,
         )
 
     async def test_approval_callback_denies(
@@ -1307,7 +1309,7 @@ class TestCanUseToolCallback:
             "Bash", {"command": "echo hi"}, ToolPermissionContext()
         )
         assert isinstance(result, PermissionResultDeny)
-        approval_callback.assert_awaited_once_with("Bash", {"command": "echo hi"})
+        approval_callback.assert_awaited_once_with("Bash", {"command": "echo hi"}, ANY)
 
     async def test_approval_callback_not_wired_when_disabled(self, tmp_path):
         """approval_callback is ignored when interactive_tool_approval is False."""

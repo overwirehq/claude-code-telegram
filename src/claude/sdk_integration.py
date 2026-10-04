@@ -292,7 +292,7 @@ def _make_can_use_tool_callback(
     working_directory: Path,
     approved_directory: Path,
     approval_callback: Optional[
-        Callable[[str, Dict[str, Any]], Awaitable[bool]]
+        Callable[[str, Dict[str, Any], ToolPermissionContext], Awaitable[bool]]
     ] = None,
     approval_tool_names: FrozenSet[str] = frozenset(),
 ) -> Any:
@@ -355,7 +355,7 @@ def _make_can_use_tool_callback(
 
         # Interactive human-in-the-loop approval for configured tools
         if approval_callback is not None and tool_name in approval_tool_names:
-            approved = await approval_callback(tool_name, tool_input)
+            approved = await approval_callback(tool_name, tool_input, context)
             if not approved:
                 logger.info(
                     "can_use_tool denied by interactive approval",
@@ -408,7 +408,7 @@ class ClaudeSDKManager:
         interrupt_event: Optional[asyncio.Event] = None,
         images: Optional[List[Dict[str, str]]] = None,
         approval_callback: Optional[
-            Callable[[str, Dict[str, Any]], Awaitable[bool]]
+            Callable[[str, Dict[str, Any], ToolPermissionContext], Awaitable[bool]]
         ] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""

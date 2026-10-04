@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import structlog
+from claude_agent_sdk import ToolPermissionContext
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
@@ -92,6 +93,22 @@ def _redact_secrets(text: str) -> str:
     return result
 
 
+def _escape_html_limited(value: str, max_length: int) -> str:
+    """Escape text and truncate it without splitting an HTML entity."""
+    escaped = escape_html(value)
+    if len(escaped) <= max_length:
+        return escaped
+
+    low, high = 0, len(value)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(escape_html(value[:middle])) + 1 <= max_length:
+            low = middle
+        else:
+            high = middle - 1
+    return escape_html(value[:low]) + "…"
+
+
 # Tool name -> friendly emoji mapping for verbose output
 _TOOL_ICONS: Dict[str, str] = {
     "Read": "\U0001f4d6",
@@ -134,6 +151,7 @@ class PendingToolApproval:
 
     user_id: int
     future: "asyncio.Future[bool]"
+    tool_use_id: Optional[str] = None
 
 
 class MessageOrchestrator:
@@ -1776,20 +1794,59 @@ class MessageOrchestrator:
         chat_id: int,
         bot: Any,
         message_thread_id: Optional[int],
-    ) -> Callable[[str, Dict[str, Any]], Awaitable[bool]]:
+    ) -> Callable[[str, Dict[str, Any], ToolPermissionContext], Awaitable[bool]]:
         """Build an approval_callback closure for a single Claude run.
 
         Sends a Telegram Allow/Deny prompt for a tool call and blocks (with a
         timeout) until the user responds via the ``tapv:`` callback handler.
         Fails closed (denies) on timeout.
+
+        ``permission_context.suggestions`` is intentionally not exposed as an
+        extra button: those values are permission-policy updates, potentially
+        persisted beyond this one tool call, while this UI grants or denies a
+        single action.
         """
 
-        async def request_approval(tool_name: str, tool_input: Dict[str, Any]) -> bool:
+        async def request_approval(
+            tool_name: str,
+            tool_input: Dict[str, Any],
+            permission_context: ToolPermissionContext,
+        ) -> bool:
             request_id = uuid.uuid4().hex[:12]
-            summary = self._summarize_tool_input_for_approval(tool_name, tool_input)
-            text = f"⚠️ Claude wants to run <b>{escape_html(tool_name)}</b>"
-            if summary:
-                text += f"\n<code>{escape_html(summary)}</code>"
+
+            if permission_context.title:
+                title = _escape_html_limited(permission_context.title, 600)
+                text = f"⚠️ <b>{title}</b>"
+            else:
+                action_name = permission_context.display_name or tool_name
+                action_name = _escape_html_limited(action_name, 200)
+                text = f"⚠️ Claude wants to run <b>{action_name}</b>"
+
+            if permission_context.description:
+                description = _escape_html_limited(permission_context.description, 900)
+                text += f"\n{description}"
+            else:
+                summary = self._summarize_tool_input_for_approval(tool_name, tool_input)
+                if summary:
+                    summary = _escape_html_limited(summary, 1000)
+                    text += f"\n<code>{summary}</code>"
+
+            details = []
+            if permission_context.blocked_path:
+                blocked_path = _escape_html_limited(
+                    permission_context.blocked_path, 700
+                )
+                details.append(f"Blocked path: <code>{blocked_path}</code>")
+            if permission_context.decision_reason:
+                decision_reason = _escape_html_limited(
+                    permission_context.decision_reason, 700
+                )
+                details.append(f"Reason: {decision_reason}")
+            if permission_context.agent_id:
+                agent_id = _escape_html_limited(permission_context.agent_id, 200)
+                details.append(f"Sub-agent: <code>{agent_id}</code>")
+            if details:
+                text += "\n\n" + "\n".join(details)
             text += "\n\nAllow this action?"
 
             keyboard = InlineKeyboardMarkup(
@@ -1811,7 +1868,9 @@ class MessageOrchestrator:
             # stalling the future until timeout.
             future: "asyncio.Future[bool]" = asyncio.get_running_loop().create_future()
             self._pending_tool_approvals[request_id] = PendingToolApproval(
-                user_id=user_id, future=future
+                user_id=user_id,
+                future=future,
+                tool_use_id=permission_context.tool_use_id,
             )
 
             try:

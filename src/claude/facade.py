@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import structlog
+from claude_agent_sdk import ToolPermissionContext
 
 from ..config.settings import Settings
 from .sdk_integration import ClaudeResponse, ClaudeSDKManager, StreamUpdate
@@ -41,7 +42,7 @@ class ClaudeIntegration:
         interrupt_event: Optional["asyncio.Event"] = None,
         images: Optional[List[Dict[str, str]]] = None,
         approval_callback: Optional[
-            Callable[[str, Dict[str, Any]], Awaitable[bool]]
+            Callable[[str, Dict[str, Any], ToolPermissionContext], Awaitable[bool]]
         ] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration."""
@@ -167,7 +168,7 @@ class ClaudeIntegration:
         interrupt_event: Optional[asyncio.Event] = None,
         images: Optional[List[Dict[str, str]]] = None,
         approval_callback: Optional[
-            Callable[[str, Dict[str, Any]], Awaitable[bool]]
+            Callable[[str, Dict[str, Any], ToolPermissionContext], Awaitable[bool]]
         ] = None,
     ) -> ClaudeResponse:
         """Execute command via SDK."""

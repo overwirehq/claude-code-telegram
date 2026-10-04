@@ -10,6 +10,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from claude_agent_sdk import ToolPermissionContext
 
 from src.bot.orchestrator import MessageOrchestrator, PendingToolApproval
 from src.config.settings import Settings
@@ -56,7 +57,9 @@ class TestMakeToolApprovalCallback:
             user_id=100, chat_id=555, bot=bot, message_thread_id=None
         )
 
-        task = asyncio.ensure_future(request_approval("Bash", {"command": "echo hi"}))
+        task = asyncio.ensure_future(
+            request_approval("Bash", {"command": "echo hi"}, ToolPermissionContext())
+        )
         await asyncio.sleep(0)  # let it register + send the prompt
 
         bot.send_message.assert_awaited_once()
@@ -77,13 +80,152 @@ class TestMakeToolApprovalCallback:
             user_id=100, chat_id=555, bot=bot, message_thread_id=None
         )
 
-        task = asyncio.ensure_future(request_approval("Bash", {"command": "echo hi"}))
+        task = asyncio.ensure_future(
+            request_approval("Bash", {"command": "echo hi"}, ToolPermissionContext())
+        )
         await asyncio.sleep(0)
 
         request_id = next(iter(orchestrator._pending_tool_approvals))
         orchestrator._pending_tool_approvals[request_id].future.set_result(False)
 
         assert await task is False
+
+    async def test_uses_rich_permission_context(self, orchestrator):
+        bot = _make_bot()
+        request_approval = orchestrator._make_tool_approval_callback(
+            user_id=100, chat_id=555, bot=bot, message_thread_id=None
+        )
+        permission_context = ToolPermissionContext(
+            tool_use_id="tool-use-123",
+            agent_id="agent-7",
+            blocked_path="/outside/<config>.py",
+            decision_reason="Outside the approved directory",
+            title="Claude wants to edit <config>.py",
+            display_name="Edit file",
+            description="Update the project configuration",
+        )
+
+        task = asyncio.ensure_future(
+            request_approval("Edit", {"file_path": "/fallback.py"}, permission_context)
+        )
+        await asyncio.sleep(0)
+
+        message = bot.send_message.await_args.kwargs["text"]
+        assert "Claude wants to edit &lt;config&gt;.py" in message
+        assert "Update the project configuration" in message
+        assert "Blocked path: <code>/outside/&lt;config&gt;.py</code>" in message
+        assert "Reason: Outside the approved directory" in message
+        assert "Sub-agent: <code>agent-7</code>" in message
+        assert "/fallback.py" not in message
+
+        request_id = next(iter(orchestrator._pending_tool_approvals))
+        assert len(request_id) == 12
+        pending = orchestrator._pending_tool_approvals[request_id]
+        assert pending.tool_use_id == "tool-use-123"
+        keyboard = bot.send_message.await_args.kwargs["reply_markup"]
+        assert keyboard.inline_keyboard[0][0].callback_data == (
+            f"tapv:allow:{request_id}"
+        )
+
+        pending.future.set_result(True)
+        assert await task is True
+
+    async def test_repeated_tool_use_id_keeps_requests_independent(self, orchestrator):
+        bot = _make_bot()
+        request_approval = orchestrator._make_tool_approval_callback(
+            user_id=100, chat_id=555, bot=bot, message_thread_id=None
+        )
+        permission_context = ToolPermissionContext(tool_use_id="replayed-tool-use")
+
+        first = asyncio.ensure_future(
+            request_approval("Bash", {"command": "echo first"}, permission_context)
+        )
+        second = asyncio.ensure_future(
+            request_approval("Bash", {"command": "echo second"}, permission_context)
+        )
+        await asyncio.sleep(0)
+
+        assert len(orchestrator._pending_tool_approvals) == 2
+        pending = list(orchestrator._pending_tool_approvals.values())
+        assert all(item.tool_use_id == "replayed-tool-use" for item in pending)
+        pending[0].future.set_result(True)
+        pending[1].future.set_result(False)
+        assert await first is True
+        assert await second is False
+
+    async def test_truncates_oversized_permission_context(self, orchestrator):
+        bot = _make_bot()
+        request_approval = orchestrator._make_tool_approval_callback(
+            user_id=100, chat_id=555, bot=bot, message_thread_id=None
+        )
+        oversized = "<&>" * 4000
+        permission_context = ToolPermissionContext(
+            title=oversized,
+            description=oversized,
+            blocked_path=oversized,
+            decision_reason=oversized,
+            agent_id=oversized,
+        )
+
+        task = asyncio.ensure_future(
+            request_approval("Bash", {"command": oversized}, permission_context)
+        )
+        await asyncio.sleep(0)
+
+        message = bot.send_message.await_args.kwargs["text"]
+        assert len(message) < 4096
+        assert "…" in message
+        assert message.count("<b>") == message.count("</b>")
+        assert message.count("<code>") == message.count("</code>")
+
+        pending = next(iter(orchestrator._pending_tool_approvals.values()))
+        pending.future.set_result(True)
+        assert await task is True
+
+    async def test_falls_back_to_tool_name_and_input_summary(self, orchestrator):
+        bot = _make_bot()
+        request_approval = orchestrator._make_tool_approval_callback(
+            user_id=100, chat_id=555, bot=bot, message_thread_id=None
+        )
+
+        task = asyncio.ensure_future(
+            request_approval(
+                "Bash",
+                {"command": "echo fallback"},
+                ToolPermissionContext(),
+            )
+        )
+        await asyncio.sleep(0)
+
+        message = bot.send_message.await_args.kwargs["text"]
+        assert "Claude wants to run <b>Bash</b>" in message
+        assert "<code>echo fallback</code>" in message
+
+        pending = next(iter(orchestrator._pending_tool_approvals.values()))
+        pending.future.set_result(False)
+        assert await task is False
+
+    async def test_uses_display_name_when_title_is_missing(self, orchestrator):
+        bot = _make_bot()
+        request_approval = orchestrator._make_tool_approval_callback(
+            user_id=100, chat_id=555, bot=bot, message_thread_id=None
+        )
+
+        task = asyncio.ensure_future(
+            request_approval(
+                "Bash",
+                {"command": "echo hi"},
+                ToolPermissionContext(display_name="Run command"),
+            )
+        )
+        await asyncio.sleep(0)
+
+        message = bot.send_message.await_args.kwargs["text"]
+        assert "Claude wants to run <b>Run command</b>" in message
+
+        pending = next(iter(orchestrator._pending_tool_approvals.values()))
+        pending.future.set_result(True)
+        assert await task is True
 
     async def test_timeout_denies_and_cleans_up(self, orchestrator):
         """With no response, wait_for(timeout=0) times out immediately -> deny (default)."""
@@ -93,7 +235,9 @@ class TestMakeToolApprovalCallback:
             user_id=100, chat_id=555, bot=bot, message_thread_id=None
         )
 
-        result = await request_approval("Bash", {"command": "echo hi"})
+        result = await request_approval(
+            "Bash", {"command": "echo hi"}, ToolPermissionContext()
+        )
 
         assert result is False
         assert orchestrator._pending_tool_approvals == {}
@@ -123,7 +267,9 @@ class TestMakeToolApprovalCallback:
             user_id=100, chat_id=555, bot=bot, message_thread_id=None
         )
 
-        task = asyncio.ensure_future(request_approval("Bash", {"command": "echo hi"}))
+        task = asyncio.ensure_future(
+            request_approval("Bash", {"command": "echo hi"}, ToolPermissionContext())
+        )
         await asyncio.sleep(0)
 
         assert registered_before_send is True
@@ -142,7 +288,9 @@ class TestMakeToolApprovalCallback:
         )
 
         with pytest.raises(RuntimeError):
-            await request_approval("Bash", {"command": "echo hi"})
+            await request_approval(
+                "Bash", {"command": "echo hi"}, ToolPermissionContext()
+            )
 
         assert orchestrator._pending_tool_approvals == {}
 
@@ -155,7 +303,9 @@ class TestMakeToolApprovalCallback:
             user_id=100, chat_id=555, bot=bot, message_thread_id=None
         )
 
-        result = await request_approval("Bash", {"command": "echo hi"})
+        result = await request_approval(
+            "Bash", {"command": "echo hi"}, ToolPermissionContext()
+        )
 
         assert result is True
         assert orchestrator._pending_tool_approvals == {}
