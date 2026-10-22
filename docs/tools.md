@@ -4,7 +4,7 @@ This document describes the tools that Claude Code can use when interacting thro
 
 ## Overview
 
-By default, the bot allows **16 tools**, configured via the `CLAUDE_ALLOWED_TOOLS` environment variable. Tool calls that touch the filesystem are validated before they run by the `can_use_tool` callback in [`src/claude/sdk_integration.py`](../src/claude/sdk_integration.py), which checks file paths and Bash commands against the `APPROVED_DIRECTORY`.
+By default, the bot allows **20 tools**, configured via the `CLAUDE_ALLOWED_TOOLS` environment variable. The list is enforced: a tool that is not on it is denied before it runs. The default includes names used by older Claude CLI versions (`Glob`, `Grep`, `LS`, `BashOutput`, `KillShell`, ...) so that it works across versions; a listed tool the CLI does not have is simply never called. Tool calls that touch the filesystem are validated before they run by the `can_use_tool` callback in [`src/claude/sdk_integration.py`](../src/claude/sdk_integration.py), which checks file paths and Bash commands against the `APPROVED_DIRECTORY`.
 
 When Claude uses a tool during a conversation, the tool name appears in real-time if verbose output is enabled (`/verbose 1` or `/verbose 2`). A tool call that fails a boundary check is denied before it executes, and Claude is told why.
 
@@ -58,8 +58,17 @@ When Claude uses a tool during a conversation, the tool name appears in real-tim
 
 | Tool | Icon | Description |
 |------|------|-------------|
-| **Task** | 🧠 | Launch a sub-agent to handle complex, multi-step operations autonomously. The sub-agent runs with its own context and returns a result when finished. |
+| **Task** | 🧠 | Launch a sub-agent to handle complex, multi-step operations autonomously. The sub-agent runs with its own context and returns a result when finished. Newer CLIs call this tool **Agent**; either name in the list allows both. Sub-agent tool calls are checked against the same list. |
 | **TaskOutput** | 🧠 | Read the output of a background sub-agent launched by **Task**. Required for retrieving results from agents that were run in the background. |
+| **TaskStop** | 🧠 | Stop a running background task or shell. |
+| **BashOutput** | 💻 | Read the output of a background shell (older CLI versions). |
+| **KillShell** | 💻 | Stop a background shell (older CLI versions; newer ones use **TaskStop**). |
+
+### Extensions
+
+| Tool | Icon | Description |
+|------|------|-------------|
+| **Skill** | 🔧 | Run a skill defined for the project. |
 
 ## Verbose Output
 
@@ -92,17 +101,34 @@ The default allowed tools list is defined in `src/config/settings.py` and can be
 
 ```bash
 # Allow only specific tools (comma-separated)
-CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Bash,Glob,Grep,LS,Task,TaskOutput,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch
+CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Bash,Glob,Grep,LS,Task,TaskOutput,TaskStop,BashOutput,KillShell,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch,Skill
 
 # Explicitly block specific tools (comma-separated, takes precedence over allowed)
 CLAUDE_DISALLOWED_TOOLS=Bash,Write
 ```
 
-`CLAUDE_DISALLOWED_TOOLS` is the list that actually blocks a tool. `CLAUDE_ALLOWED_TOOLS`
-pre-approves tools so they skip the permission handler; the filesystem tools are
-deliberately withheld from that pre-approval so their boundary checks run (see
-[Security](../SECURITY.md#tool-call-enforcement)), which means dropping one of them
-from the list does not disable it.
+A tool that is not in `CLAUDE_ALLOWED_TOOLS` is denied, and the reply tells you
+which calls were blocked. Removing a tool from the list disables it -- the
+filesystem tools included, although they are withheld from the CLI's
+pre-approval so their boundary checks run (see
+[Security](../SECURITY.md#tool-call-enforcement)).
+
+Things to know when trimming or extending the list:
+
+- **MCP tools** (`mcp__<server>__<tool>`): with `ENABLE_MCP=true`, every tool of a
+  server in `MCP_CONFIG_PATH` is allowed. MCP servers from anywhere else (such as
+  a project's `.mcp.json`) are denied unless listed, by tool name or as
+  `mcp__<server>` for the whole server.
+- **Tools left out on purpose:** `AskUserQuestion`, `EnterPlanMode` and
+  `ExitPlanMode` need an interactive Claude Code UI that the bot does not have,
+  and newer CLI tools that schedule work, run commands in the background or spawn
+  agents (`Monitor`, `CronCreate`, `Workflow`, `SendMessage`, ...) are not in the
+  default list. Add one to the list to opt in.
+- **New CLI tools** are denied until listed. If a CLI upgrade introduces a tool
+  you want, add it to the list.
+- An empty `CLAUDE_ALLOWED_TOOLS` means no allowlist, not "allow nothing".
+
+`CLAUDE_DISALLOWED_TOOLS` blocks a tool even if it is in the allowed list.
 
 To turn off tool validation entirely:
 
@@ -124,7 +150,8 @@ Even when a tool is allowed, additional security checks apply. The exact checks 
 
 4. **Audit logging** (all modes) — All tool calls and security violations are recorded for review.
 
-Layers 1 and 3 require `DISABLE_TOOL_VALIDATION=false` (the default); setting it to
-`true` disables them along with the allow/deny lists.
+Layers 1 and 3, and enforcement of `CLAUDE_ALLOWED_TOOLS`, require
+`DISABLE_TOOL_VALIDATION=false` (the default); setting it to `true` disables them
+along with the allow/deny lists.
 
 See [Security](../SECURITY.md) for the full security model.

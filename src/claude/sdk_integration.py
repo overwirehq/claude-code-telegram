@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -11,6 +12,7 @@ from typing import (
     Callable,
     Dict,
     FrozenSet,
+    Iterable,
     List,
     Optional,
 )
@@ -24,6 +26,10 @@ from claude_agent_sdk import (
     CLIConnectionError,
     CLIJSONDecodeError,
     CLINotFoundError,
+    HookContext,
+    HookInput,
+    HookJSONOutput,
+    HookMatcher,
     Message,
     PermissionResultAllow,
     PermissionResultDeny,
@@ -286,6 +292,102 @@ GUARDED_TOOLS = FILE_TOOLS | BASH_TOOLS
 # Keys under which the guarded file tools pass their target path.
 _FILE_PATH_KEYS = ("file_path", "path", "notebook_path")
 
+# Tools the CLI has renamed. An allowlist entry under either name covers calls
+# under the other, so a CLAUDE_ALLOWED_TOOLS value written for one CLI version
+# keeps sub-agents working on the next.
+_TOOL_ALIASES = {"Agent": "Task", "Task": "Agent"}
+
+_MCP_PREFIX = "mcp__"
+
+
+def _mcp_tool_prefix(server_name: str) -> str:
+    """Return the ``mcp__<server>__`` prefix the CLI gives a server's tools.
+
+    The CLI replaces characters outside ``[a-zA-Z0-9_-]`` in the server name.
+    """
+    return f"{_MCP_PREFIX}{re.sub(r'[^a-zA-Z0-9_-]', '_', server_name)}__"
+
+
+def _make_tool_allowlist(
+    allowed_tools: Iterable[str],
+    mcp_server_names: Iterable[str] = (),
+) -> Callable[[str], bool]:
+    """Build a predicate telling whether a tool name is on the allowlist.
+
+    ``allowed_tools`` uses the CLI's allow-rule syntax. Plain names match
+    exactly; ``mcp__<server>`` and ``mcp__<server>__*`` cover every tool of
+    that server. A scoped rule such as ``Bash(git:*)`` allows the tool by
+    name: the hook runs before the CLI's allow rules and cannot evaluate the
+    scope, so calls outside it are left to the CLI and can_use_tool. Every
+    tool of a configured MCP server (``mcp_server_names``) is allowed, since
+    MCP tool names are never listed in CLAUDE_ALLOWED_TOOLS. See issue #221.
+    """
+    names = set()
+    prefixes = [_mcp_tool_prefix(server) for server in mcp_server_names]
+    for entry in allowed_tools:
+        entry = entry.split("(", 1)[0].strip()
+        if not entry:
+            continue
+        if entry.startswith(_MCP_PREFIX):
+            server_rule = entry[: -len("__*")] if entry.endswith("__*") else entry
+            if "__" not in server_rule[len(_MCP_PREFIX) :]:
+                prefixes.append(server_rule + "__")
+                continue
+        names.add(entry)
+
+    def is_allowed(tool_name: str) -> bool:
+        if tool_name in names or _TOOL_ALIASES.get(tool_name) in names:
+            return True
+        return any(tool_name.startswith(prefix) for prefix in prefixes)
+
+    return is_allowed
+
+
+def _make_tool_allowlist_hook(is_allowed: Callable[[str], bool]) -> Any:
+    """Create a PreToolUse hook that denies tools not on the allowlist.
+
+    This cannot live in can_use_tool: the CLI consults that callback only for
+    calls that need permission, and runs read-only tools, sub-agent launches
+    and reads inside the working directory without asking. A PreToolUse hook
+    sees every call, sub-agents' included. Allowed calls get an empty result,
+    never ``permissionDecision: "allow"``, which would skip can_use_tool and
+    with it the boundary checks. The CLI reports a denied call in the
+    result's ``permission_denials``, which the bot shows the user. See issue
+    #221.
+    """
+
+    async def pre_tool_use(
+        input_data: HookInput,
+        tool_use_id: Optional[str],
+        context: HookContext,
+    ) -> HookJSONOutput:
+        if input_data["hook_event_name"] != "PreToolUse":
+            return {}
+        tool_name = input_data["tool_name"]
+        if is_allowed(tool_name):
+            return {}
+
+        # Fails closed: a tool nobody listed -- including one a newer CLI
+        # introduces -- is denied.
+        logger.warning(
+            "Denied tool not in CLAUDE_ALLOWED_TOOLS",
+            tool_name=tool_name,
+            agent_type=input_data.get("agent_type"),
+        )
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    f"The {tool_name} tool is not enabled for this bot "
+                    "(it is not in CLAUDE_ALLOWED_TOOLS). Do not retry it; "
+                    "continue without it or tell the user it is unavailable."
+                ),
+            }
+        }
+
+    return pre_tool_use
+
 
 def _make_can_use_tool_callback(
     security_validator: SecurityValidator,
@@ -539,6 +641,30 @@ class ClaudeSDKManager:
                     "MCP servers configured",
                     mcp_config_path=str(self.config.mcp_config_path),
                 )
+
+            # Enforce CLAUDE_ALLOWED_TOOLS (#221). Built from the configured
+            # list, not sdk_allowed_tools: the guarded and approval-gated tools
+            # stripped above are still allowed, they just have to pass
+            # can_use_tool. An unset or empty list sends the CLI no allow
+            # rules, so it is read as "no allowlist" rather than "allow
+            # nothing".
+            if (
+                not self.config.disable_tool_validation
+                and self.config.claude_allowed_tools
+            ):
+                tool_allowlist = _make_tool_allowlist(
+                    self.config.claude_allowed_tools,
+                    mcp_server_names=(
+                        options.mcp_servers
+                        if isinstance(options.mcp_servers, dict)
+                        else ()
+                    ),
+                )
+                options.hooks = {
+                    "PreToolUse": [
+                        HookMatcher(hooks=[_make_tool_allowlist_hook(tool_allowlist)])
+                    ]
+                }
 
             # Wire can_use_tool callback for preventive tool validation
             if self.security_validator:

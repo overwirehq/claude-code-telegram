@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     # docs/configuration.md, .env.example,
     # src/claude/facade.py (_get_admin_instructions),
     # and src/bot/orchestrator.py (_TOOL_ICONS).
+    # This is enforced: a tool not on it is denied (#221). It names tools from
+    # older CLI versions too (Glob, Grep, LS, BashOutput, KillShell, ...) so
+    # the default works across versions; listing a tool the CLI lacks is
+    # harmless.
     claude_allowed_tools: Optional[List[str]] = Field(
         default=[
             "Read",
@@ -130,6 +134,9 @@ class Settings(BaseSettings):
             "LS",
             "Task",
             "TaskOutput",
+            "TaskStop",
+            "BashOutput",
+            "KillShell",
             "MultiEdit",
             "NotebookRead",
             "NotebookEdit",
@@ -139,7 +146,7 @@ class Settings(BaseSettings):
             "WebSearch",
             "Skill",
         ],
-        description="List of allowed Claude tools",
+        description="List of allowed Claude tools; tools not listed are denied",
     )
     claude_disallowed_tools: Optional[List[str]] = Field(
         default=[],

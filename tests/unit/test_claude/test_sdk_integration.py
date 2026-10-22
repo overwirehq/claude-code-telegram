@@ -25,6 +25,8 @@ from src.claude.sdk_integration import (
     ClaudeSDKManager,
     StreamUpdate,
     _make_can_use_tool_callback,
+    _make_tool_allowlist,
+    _make_tool_allowlist_hook,
 )
 from src.config.settings import Settings
 
@@ -1492,6 +1494,193 @@ class TestGuardedToolsNotPreApproved:
         await self._capture(manager, tmp_path)
 
         assert config.claude_allowed_tools == original
+
+
+class TestToolAllowlist:
+    """CLAUDE_ALLOWED_TOOLS is enforced by a PreToolUse hook (#221).
+
+    Before #221 a tool left off the list fell through to can_use_tool, which
+    allowed it -- and tools the CLI runs without asking (read-only tools,
+    sub-agent launches) never reached the callback at all.
+    """
+
+    def test_plain_names_match_exactly(self):
+        allowed = _make_tool_allowlist(["Read", "Grep"])
+        assert allowed("Read")
+        assert allowed("Grep")
+        assert not allowed("WebFetch")
+        assert not allowed("read")
+
+    def test_task_and_agent_are_aliases(self):
+        """The CLI renamed Task to Agent; either entry keeps sub-agents working."""
+        assert _make_tool_allowlist(["Task"])("Agent")
+        assert _make_tool_allowlist(["Agent"])("Task")
+
+    def test_scoped_rule_allows_the_tool_by_name(self):
+        """The hook runs before the CLI's allow rules and cannot evaluate
+        Bash(git:*); denying Bash would block the git calls it pre-approves."""
+        allowed = _make_tool_allowlist(["Bash(git:*)"])
+        assert allowed("Bash")
+        assert not allowed("Read")
+
+    def test_configured_mcp_servers_are_allowed(self):
+        allowed = _make_tool_allowlist(["Read"], mcp_server_names=["github"])
+        assert allowed("mcp__github__create_issue")
+        assert not allowed("mcp__other__tool")
+        assert not allowed("mcp__githubx__tool")
+
+    def test_mcp_server_name_is_normalised(self):
+        """The CLI replaces characters outside [a-zA-Z0-9_-] in server names."""
+        allowed = _make_tool_allowlist([], mcp_server_names=["my.server"])
+        assert allowed("mcp__my_server__tool")
+
+    @pytest.mark.parametrize("entry", ["mcp__github", "mcp__github__*"])
+    def test_server_level_mcp_rules(self, entry):
+        allowed = _make_tool_allowlist([entry])
+        assert allowed("mcp__github__create_issue")
+        assert not allowed("mcp__gitlab__create_issue")
+
+    def test_single_mcp_tool_rule(self):
+        allowed = _make_tool_allowlist(["mcp__github__create_issue"])
+        assert allowed("mcp__github__create_issue")
+        assert not allowed("mcp__github__delete_repo")
+
+    # -- the PreToolUse hook ------------------------------------------------
+
+    @staticmethod
+    def _hook_input(tool_name, tool_input=None, **extra):
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": tool_input or {},
+            "tool_use_id": "toolu_1",
+            "session_id": "s",
+            "transcript_path": "/t",
+            "cwd": "/c",
+            **extra,
+        }
+
+    async def test_hook_denies_unlisted_tool(self):
+        hook = _make_tool_allowlist_hook(_make_tool_allowlist(["Read"]))
+        out = await hook(self._hook_input("CronList"), "toolu_1", {"signal": None})
+        decision = out["hookSpecificOutput"]
+        assert decision["hookEventName"] == "PreToolUse"
+        assert decision["permissionDecision"] == "deny"
+        assert "CronList" in decision["permissionDecisionReason"]
+        assert "CLAUDE_ALLOWED_TOOLS" in decision["permissionDecisionReason"]
+
+    async def test_hook_denies_unlisted_tool_inside_subagent(self):
+        hook = _make_tool_allowlist_hook(_make_tool_allowlist(["Read", "Task"]))
+        out = await hook(
+            self._hook_input("CronList", agent_id="a1", agent_type="general-purpose"),
+            "toolu_1",
+            {"signal": None},
+        )
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    async def test_hook_makes_no_decision_for_listed_tool(self):
+        """An explicit "allow" would skip can_use_tool and its boundary checks."""
+        hook = _make_tool_allowlist_hook(_make_tool_allowlist(["Write"]))
+        out = await hook(
+            self._hook_input("Write", {"file_path": "/etc/passwd"}),
+            "toolu_1",
+            {"signal": None},
+        )
+        assert out == {}
+
+    async def test_hook_ignores_other_events(self):
+        hook = _make_tool_allowlist_hook(_make_tool_allowlist([]))
+        out = await hook(
+            {**self._hook_input("CronList"), "hook_event_name": "PostToolUse"},
+            "toolu_1",
+            {"signal": None},
+        )
+        assert out == {}
+
+    # -- wiring through execute_command ------------------------------------
+
+    @staticmethod
+    async def _options(tmp_path, validator=None, **overrides):
+        settings = Settings(
+            telegram_bot_token="test:token",
+            telegram_bot_username="testbot",
+            approved_directory=tmp_path,
+            claude_timeout_seconds=2,
+            **overrides,
+        )
+        manager = ClaudeSDKManager(settings, security_validator=validator)
+        return await TestGuardedToolsNotPreApproved._capture(manager, tmp_path)
+
+    @classmethod
+    async def _decide(cls, options, tool_name, tool_input=None):
+        """Run the configured PreToolUse hooks; True if the call may proceed."""
+        for matcher in (options.hooks or {}).get("PreToolUse", []):
+            for hook in matcher.hooks:
+                out = await hook(
+                    cls._hook_input(tool_name, tool_input), "toolu_1", {"signal": None}
+                )
+                decision = out.get("hookSpecificOutput", {}).get("permissionDecision")
+                assert decision != "allow", "would bypass can_use_tool"
+                if decision == "deny":
+                    return False
+        return True
+
+    async def test_default_config_denies_unlisted_tool(self, tmp_path):
+        options = await self._options(
+            tmp_path, TestGuardedToolsNotPreApproved._validator(tmp_path)
+        )
+        assert not await self._decide(options, "CronList")
+        assert not await self._decide(options, "Workflow")
+        # Stripped from allowed_tools, but still on the allowlist.
+        assert await self._decide(options, "Bash", {"command": "ls"})
+        assert await self._decide(options, "Read", {"file_path": "x"})
+        # Sub-agents, under either tool name.
+        assert await self._decide(options, "Task")
+        assert await self._decide(options, "Agent")
+
+    async def test_removed_guarded_tool_is_denied(self, tmp_path):
+        options = await self._options(
+            tmp_path,
+            TestGuardedToolsNotPreApproved._validator(tmp_path),
+            claude_allowed_tools=["Read", "Grep"],
+        )
+        assert not await self._decide(options, "Write", {"file_path": "a.txt"})
+        assert not await self._decide(options, "Bash", {"command": "ls"})
+        assert await self._decide(options, "Read", {"file_path": "a.txt"})
+
+    async def test_disable_tool_validation_skips_enforcement(self, tmp_path):
+        options = await self._options(
+            tmp_path,
+            TestGuardedToolsNotPreApproved._validator(tmp_path),
+            disable_tool_validation=True,
+        )
+        assert not options.hooks
+        assert await self._decide(options, "Workflow")
+
+    async def test_empty_allowlist_is_not_enforced(self, tmp_path):
+        """An empty list sends no allow rules; it is "unset", not "allow nothing"."""
+        options = await self._options(
+            tmp_path,
+            TestGuardedToolsNotPreApproved._validator(tmp_path),
+            claude_allowed_tools=[],
+        )
+        assert await self._decide(options, "Workflow")
+
+    async def test_mcp_config_servers_allowed(self, tmp_path):
+        import json
+
+        mcp_config = tmp_path / "mcp.json"
+        mcp_config.write_text(
+            json.dumps({"mcpServers": {"github": {"command": "gh-mcp"}}})
+        )
+        options = await self._options(
+            tmp_path,
+            TestGuardedToolsNotPreApproved._validator(tmp_path),
+            enable_mcp=True,
+            mcp_config_path=mcp_config,
+        )
+        assert await self._decide(options, "mcp__github__list_prs")
+        assert not await self._decide(options, "mcp__rogue__tool")
 
 
 class TestSessionIdFallback:

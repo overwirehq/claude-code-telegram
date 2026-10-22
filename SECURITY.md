@@ -97,10 +97,21 @@ bot) and `DISABLE_TOOL_VALIDATION` is `false` (the default).
 - Direct use of `ClaudeSDKManager` without a `SecurityValidator` (there is no
   validator to consult).
 
-Note that `CLAUDE_ALLOWED_TOOLS` is not itself an enforcement boundary while the
-callback is wired: a tool left out of the list is not blocked, it is simply routed
-to the callback, which allows anything that passes the boundary checks. Use
-`CLAUDE_DISALLOWED_TOOLS` to actually block a tool.
+`CLAUDE_ALLOWED_TOOLS` is enforced by a separate `PreToolUse` hook, which the CLI
+runs for every tool call -- sub-agents' calls included. The callback cannot do
+this job: the CLI does not consult it for calls that need no permission
+(read-only tools, sub-agent launches, reads inside the working directory). The
+hook denies a tool that is not on the list, so a filesystem tool removed from the
+list is disabled outright; for a listed tool it makes no decision, leaving the
+call to the allow rules and the callback above (a hook "allow" would skip the
+callback). Tools of the MCP servers in `MCP_CONFIG_PATH` are allowed when
+`ENABLE_MCP=true`. A tool nobody listed, including one a future CLI introduces,
+is denied: the list is the single source of truth, and the CLI reports each
+denial in the run result, which the bot shows in its reply. Before this was
+fixed, a tool left off the list was allowed
+([#221](https://github.com/overwirehq/claude-code-telegram/issues/221)). The hook
+is off under `DISABLE_TOOL_VALIDATION=true`. `CLAUDE_DISALLOWED_TOOLS` still
+blocks a tool even when it is listed.
 
 **Known gap:** token-based authentication is not usable end to end. The provider
 exists, but `src/main.py` still backs it with `InMemoryTokenStorage`, so issued
