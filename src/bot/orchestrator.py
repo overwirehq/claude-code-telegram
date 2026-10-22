@@ -21,6 +21,7 @@ from telegram import (
     InputMediaPhoto,
     Update,
 )
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -40,6 +41,7 @@ from .utils.image_extractor import (
     should_send_as_photo,
     validate_image_path,
 )
+from .utils.telegram_retry import retry_telegram_network
 
 logger = structlog.get_logger()
 
@@ -993,7 +995,11 @@ class MessageOrchestrator:
                 return
 
         chat = update.message.chat
-        await chat.send_action("typing")
+        try:
+            await chat.send_action("typing")
+        except NetworkError as exc:
+            # Typing indicators are cosmetic and must not abort a real request.
+            logger.debug("Failed to send typing action, ignoring", error=str(exc))
 
         verbose_level = self._get_verbose_level(context)
 
@@ -1002,8 +1008,8 @@ class MessageOrchestrator:
         stop_kb = InlineKeyboardMarkup(
             [[InlineKeyboardButton("Stop", callback_data=f"stop:{user_id}")]]
         )
-        progress_msg = await update.message.reply_text(
-            "Working...", reply_markup=stop_kb
+        progress_msg = await retry_telegram_network(
+            lambda: update.message.reply_text("Working...", reply_markup=stop_kb)
         )
 
         # Register active request for stop callback
@@ -1171,38 +1177,45 @@ class MessageOrchestrator:
                 if not message.text or not message.text.strip():
                     continue
                 try:
-                    await update.message.reply_text(
-                        message.text,
-                        parse_mode=message.parse_mode,
-                        reply_markup=None,  # No keyboards in agentic mode
-                        reply_to_message_id=(
-                            update.message.message_id if i == 0 else None
-                        ),
-                    )
-                    if i < len(formatted_messages) - 1:
-                        await asyncio.sleep(0.5)
-                except Exception as send_err:
-                    logger.warning(
-                        "Failed to send HTML response, retrying as plain text",
-                        error=str(send_err),
-                        message_index=i,
-                    )
-                    try:
-                        await update.message.reply_text(
+                    await retry_telegram_network(
+                        lambda: update.message.reply_text(
                             message.text,
-                            reply_markup=None,
+                            parse_mode=message.parse_mode,
+                            reply_markup=None,  # No keyboards in agentic mode
                             reply_to_message_id=(
                                 update.message.message_id if i == 0 else None
                             ),
                         )
+                    )
+                    if i < len(formatted_messages) - 1:
+                        await asyncio.sleep(0.5)
+                except BadRequest as send_err:
+                    logger.warning(
+                        "Failed to send formatted response, retrying as plain text",
+                        error=str(send_err),
+                        message_index=i,
+                    )
+                    try:
+                        await retry_telegram_network(
+                            lambda: update.message.reply_text(
+                                message.text,
+                                reply_markup=None,
+                                reply_to_message_id=(
+                                    update.message.message_id if i == 0 else None
+                                ),
+                            )
+                        )
                     except Exception as plain_err:
-                        await update.message.reply_text(
-                            f"Failed to deliver response "
-                            f"(Telegram error: {str(plain_err)[:150]}). "
-                            f"Please try again.",
-                            reply_to_message_id=(
-                                update.message.message_id if i == 0 else None
-                            ),
+                        plain_error_text = str(plain_err)[:150]
+                        await retry_telegram_network(
+                            lambda: update.message.reply_text(
+                                f"Failed to deliver response "
+                                f"(Telegram error: {plain_error_text}). "
+                                f"Please try again.",
+                                reply_to_message_id=(
+                                    update.message.message_id if i == 0 else None
+                                ),
+                            )
                         )
 
             # Send images separately if caption wasn't used
