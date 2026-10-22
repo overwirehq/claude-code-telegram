@@ -94,7 +94,7 @@ CLAUDE_MAX_COST_PER_USER=10.0
 CLAUDE_MAX_COST_PER_REQUEST=5.0
 
 # Allowed Claude tools (comma-separated list; see docs/tools.md for descriptions)
-CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Bash,Glob,Grep,LS,Task,TaskOutput,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch
+CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Bash,Glob,Grep,LS,Task,TaskOutput,TaskStop,BashOutput,KillShell,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch,Skill
 ```
 
 #### Rate Limiting
