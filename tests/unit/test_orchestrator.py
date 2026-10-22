@@ -82,8 +82,8 @@ def deps():
     }
 
 
-def test_agentic_registers_6_commands(agentic_settings, deps):
-    """Agentic mode registers start, new, status, verbose, repo, restart commands."""
+def test_agentic_registers_7_commands(agentic_settings, deps):
+    """Agentic mode registers its seven supported commands."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -100,17 +100,18 @@ def test_agentic_registers_6_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 6
+    assert len(cmd_handlers) == 7
     assert frozenset({"start"}) in commands
     assert frozenset({"new"}) in commands
     assert frozenset({"status"}) in commands
     assert frozenset({"verbose"}) in commands
+    assert frozenset({"effort"}) in commands
     assert frozenset({"repo"}) in commands
     assert frozenset({"restart"}) in commands
 
 
-def test_classic_registers_14_commands(classic_settings, deps):
-    """Classic mode registers all 14 commands."""
+def test_classic_registers_15_commands(classic_settings, deps):
+    """Classic mode registers all 15 commands."""
     orchestrator = MessageOrchestrator(classic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -125,7 +126,7 @@ def test_classic_registers_14_commands(classic_settings, deps):
         if isinstance(call[0][0], CommandHandler)
     ]
 
-    assert len(cmd_handlers) == 14
+    assert len(cmd_handlers) == 15
 
 
 def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
@@ -156,25 +157,34 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
 
 
 async def test_agentic_bot_commands(agentic_settings, deps):
-    """Agentic mode returns 6 bot commands."""
+    """Agentic mode returns 7 bot commands."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     commands = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 6
+    assert len(commands) == 7
     cmd_names = [c.command for c in commands]
-    assert cmd_names == ["start", "new", "status", "verbose", "repo", "restart"]
+    assert cmd_names == [
+        "start",
+        "new",
+        "status",
+        "verbose",
+        "effort",
+        "repo",
+        "restart",
+    ]
 
 
 async def test_classic_bot_commands(classic_settings, deps):
-    """Classic mode returns 14 bot commands."""
+    """Classic mode returns 15 bot commands."""
     orchestrator = MessageOrchestrator(classic_settings, deps)
     commands = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 14
+    assert len(commands) == 15
     cmd_names = [c.command for c in commands]
     assert "start" in cmd_names
     assert "help" in cmd_names
     assert "git" in cmd_names
+    assert "effort" in cmd_names
     assert "restart" in cmd_names
 
 
@@ -264,6 +274,7 @@ async def test_agentic_status_compact(agentic_settings, deps):
     call_args = update.message.reply_text.call_args
     text = call_args.args[0]
     assert "Session: none" in text
+    assert "Effort: default" in text
 
 
 async def test_agentic_text_calls_claude(agentic_settings, deps):
@@ -813,7 +824,9 @@ async def test_thread_mode_loads_and_persists_thread_state(group_thread_settings
 
     async def dummy_handler(update, context):
         assert context.user_data["claude_session_id"] == "old-session"
+        assert context.user_data["claude_effort"] == "high"
         context.user_data["claude_session_id"] = "new-session"
+        context.user_data["claude_effort"] = "max"
 
     wrapped = orchestrator._inject_deps(dummy_handler)
 
@@ -830,6 +843,7 @@ async def test_thread_mode_loads_and_persists_thread_state(group_thread_settings
             "-1001234567890:777": {
                 "current_directory": str(project_path),
                 "claude_session_id": "old-session",
+                "claude_effort": "high",
             }
         }
     }
@@ -839,6 +853,10 @@ async def test_thread_mode_loads_and_persists_thread_state(group_thread_settings
     assert (
         context.user_data["thread_state"]["-1001234567890:777"]["claude_session_id"]
         == "new-session"
+    )
+    assert (
+        context.user_data["thread_state"]["-1001234567890:777"]["claude_effort"]
+        == "max"
     )
 
 

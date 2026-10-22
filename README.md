@@ -98,7 +98,7 @@ The bot supports two interaction modes:
 
 The default conversational mode. Just talk to Claude naturally -- no special commands required.
 
-**Commands:** `/start`, `/new`, `/status`, `/verbose`, `/repo`
+**Commands:** `/start`, `/new`, `/status`, `/verbose`, `/effort`, `/repo`
 If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`
 
 ```
@@ -129,6 +129,10 @@ Use `/verbose 0|1|2` to control how much background activity is shown:
 | **1** (normal, default) | Tool names + reasoning snippets in real-time |
 | **2** (detailed) | Tool names with inputs + longer reasoning text |
 
+Use `/effort low|medium|high|xhigh|max` to set Claude's reasoning effort for
+the current conversation. `/effort` shows the current value, and
+`/effort default` returns to the SDK default.
+
 #### GitHub Workflow
 
 Claude Code already knows how to use `gh` CLI and `git`. Authenticate on your server with `gh auth login`, then work with repos conversationally:
@@ -155,9 +159,9 @@ Use `/repo` to list cloned repos in your workspace, or `/repo <name>` to switch 
 
 ### Classic Mode
 
-Set `AGENTIC_MODE=false` to enable the full 13-command terminal-like interface with directory navigation, inline keyboards, quick actions, git integration, and session export.
+Set `AGENTIC_MODE=false` to enable the full terminal-like interface with directory navigation, inline keyboards, quick actions, git integration, and session export.
 
-**Commands:** `/start`, `/help`, `/new`, `/continue`, `/end`, `/status`, `/cd`, `/ls`, `/pwd`, `/projects`, `/export`, `/actions`, `/git`  
+**Commands:** `/start`, `/help`, `/new`, `/continue`, `/end`, `/status`, `/effort`, `/cd`, `/ls`, `/pwd`, `/projects`, `/export`, `/actions`, `/git`
 If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`
 
 ```

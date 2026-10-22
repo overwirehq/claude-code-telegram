@@ -2,7 +2,7 @@
 
 ## Project Description
 
-A Telegram bot that provides remote access to Claude Code, allowing developers to interact with their projects from anywhere. The default interaction model is **agentic mode** -- a conversational interface where users chat naturally with Claude. A classic terminal-like mode with 13 commands is also available.
+A Telegram bot that provides remote access to Claude Code, allowing developers to interact with their projects from anywhere. The default interaction model is **agentic mode** -- a conversational interface where users chat naturally with Claude. A classic terminal-like mode with navigation and inline keyboards is also available.
 
 ## Core Objectives
 

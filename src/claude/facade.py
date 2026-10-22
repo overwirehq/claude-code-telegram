@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import structlog
+from claude_agent_sdk import EffortLevel
 
 from ..config.settings import Settings
 from .sdk_integration import ClaudeResponse, ClaudeSDKManager, StreamUpdate
@@ -43,6 +44,7 @@ class ClaudeIntegration:
         approval_callback: Optional[
             Callable[[str, Dict[str, Any]], Awaitable[bool]]
         ] = None,
+        effort: Optional[EffortLevel] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration."""
         logger.info(
@@ -94,6 +96,7 @@ class ClaudeIntegration:
                     interrupt_event=interrupt_event,
                     images=images,
                     approval_callback=approval_callback,
+                    effort=effort,
                 )
             except Exception as resume_error:
                 # If resume failed (e.g., session expired/missing on Claude's side),
@@ -121,6 +124,7 @@ class ClaudeIntegration:
                         interrupt_event=interrupt_event,
                         images=images,
                         approval_callback=approval_callback,
+                        effort=effort,
                     )
                 else:
                     raise
@@ -169,6 +173,7 @@ class ClaudeIntegration:
         approval_callback: Optional[
             Callable[[str, Dict[str, Any]], Awaitable[bool]]
         ] = None,
+        effort: Optional[EffortLevel] = None,
     ) -> ClaudeResponse:
         """Execute command via SDK."""
         return await self.sdk_manager.execute_command(
@@ -180,6 +185,7 @@ class ClaudeIntegration:
             interrupt_event=interrupt_event,
             images=images,
             approval_callback=approval_callback,
+            effort=effort,
         )
 
     async def _find_resumable_session(
@@ -214,6 +220,7 @@ class ClaudeIntegration:
         working_directory: Path,
         prompt: Optional[str] = None,
         on_stream: Optional[Callable[[StreamUpdate], None]] = None,
+        effort: Optional[EffortLevel] = None,
     ) -> Optional[ClaudeResponse]:
         """Continue the most recent session."""
         logger.info(
@@ -248,6 +255,7 @@ class ClaudeIntegration:
             user_id=user_id,
             session_id=latest_session.session_id,
             on_stream=on_stream,
+            effort=effort,
         )
 
     async def get_session_info(
