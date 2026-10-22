@@ -1484,6 +1484,43 @@ class TestGuardedToolsNotPreApproved:
 
         assert options.allowed_tools == ["Grep"]
 
+    @pytest.mark.parametrize(
+        "rule",
+        ["Bash(git:*)", "Bash(mkdir:*)", "Read(//etc/**)", "Write(*)", "Edit(src/**)"],
+    )
+    async def test_scoped_rules_for_guarded_tools_are_stripped(self, tmp_path, rule):
+        """A scoped rule pre-approves the calls it matches, skipping the
+        boundary check exactly like a bare tool name would."""
+        manager = ClaudeSDKManager(
+            self._config(tmp_path, claude_allowed_tools=[rule, "Grep", "Grep(foo)"]),
+            security_validator=self._validator(tmp_path),
+        )
+        options = await self._capture(manager, tmp_path)
+
+        assert options.allowed_tools == ["Grep", "Grep(foo)"]
+
+    async def test_scoped_rules_for_approval_gated_tools_are_stripped(self, tmp_path):
+        """The approval prompt has the same bypass for a scoped rule."""
+        manager = ClaudeSDKManager(
+            self._config(
+                tmp_path,
+                claude_allowed_tools=["WebFetch(domain:example.com)", "Grep"],
+                interactive_tool_approval=True,
+                interactive_tool_approval_tools=["WebFetch"],
+            )
+        )
+        options = await self._capture(manager, tmp_path)
+
+        assert options.allowed_tools == ["Grep"]
+
+    async def test_scoped_rules_kept_without_security_validator(self, tmp_path):
+        manager = ClaudeSDKManager(
+            self._config(tmp_path, claude_allowed_tools=["Bash(git:*)", "Grep"])
+        )
+        options = await self._capture(manager, tmp_path)
+
+        assert options.allowed_tools == ["Bash(git:*)", "Grep"]
+
     async def test_config_allowed_tools_not_mutated(self, tmp_path):
         """Filtering builds a new list; the Settings value is left intact."""
         config = self._config(tmp_path)

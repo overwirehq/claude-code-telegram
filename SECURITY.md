@@ -75,7 +75,9 @@ The callback is reactive: the SDK runs it only when the Claude CLI sends a
 `can_use_tool` control request, and the CLI resolves its allow rules before asking.
 A tool named in `CLAUDE_ALLOWED_TOOLS` is therefore pre-approved and never reaches
 the callback. To keep the checks live, `ClaudeSDKManager.execute_command` removes
-the guarded tools from the `allowed_tools` it hands the SDK and disables
+the guarded tools from the `allowed_tools` it hands the SDK -- scoped rules such as
+`Bash(git:*)` or `Read(//etc/**)` included, since a scoped rule pre-approves the
+calls it matches just like a bare tool name -- and disables
 `autoAllowBashIfSandboxed` (a second bypass, which auto-approves sandboxed Bash
 without a control request). Before this was fixed the checks were wired up but
 never consulted on a default configuration

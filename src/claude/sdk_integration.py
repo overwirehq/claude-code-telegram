@@ -287,6 +287,16 @@ GUARDED_TOOLS = FILE_TOOLS | BASH_TOOLS
 _FILE_PATH_KEYS = ("file_path", "path", "notebook_path")
 
 
+def _allow_rule_tool(rule: str) -> str:
+    """Return the tool an allow rule applies to.
+
+    A scoped rule such as ``Bash(git:*)`` or ``Read(//etc/**)`` pre-approves
+    the calls it matches just as a bare ``Bash`` pre-approves every call, so
+    both must be stripped when the tool has to reach can_use_tool.
+    """
+    return rule.split("(", 1)[0].strip()
+
+
 def _make_can_use_tool_callback(
     security_validator: SecurityValidator,
     working_directory: Path,
@@ -467,6 +477,8 @@ class ClaudeSDKManager:
             # allowed_tools is therefore pre-approved and its boundary check
             # never runs. Strip them so each call is routed to the callback,
             # which allows everything that passes validation. Issue #219.
+            # Scoped rules such as Bash(git:*) are pre-approvals too and are
+            # stripped by the tool they name.
             boundary_checks_active = (
                 self.security_validator is not None
                 and not self.config.disable_tool_validation
@@ -489,10 +501,14 @@ class ClaudeSDKManager:
                 tools_to_strip = tools_to_strip | GUARDED_TOOLS
 
             if tools_to_strip:
-                gated = [t for t in sdk_allowed_tools if t in tools_to_strip]
+                gated = [
+                    rule
+                    for rule in sdk_allowed_tools
+                    if _allow_rule_tool(rule) in tools_to_strip
+                ]
                 if gated:
                     sdk_allowed_tools = [
-                        tool for tool in sdk_allowed_tools if tool not in tools_to_strip
+                        rule for rule in sdk_allowed_tools if rule not in gated
                     ]
                     logger.debug(
                         "Routing guarded tools through can_use_tool",
