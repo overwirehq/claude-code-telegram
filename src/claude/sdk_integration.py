@@ -781,9 +781,15 @@ class ClaudeSDKManager:
                     previous_session_id=session_id,
                 )
 
-            # Use ResultMessage.result if available, fall back to message extraction
-            if result_content is not None:
-                content = str(result_content).strip()
+            # Some Anthropic-compatible providers (including OpenRouter) return
+            # an empty ResultMessage.result even though the AssistantMessage
+            # contains the actual reply. Only prefer a non-empty result so those
+            # providers still reach the message-extraction fallback (#171).
+            result_text = (
+                str(result_content).strip() if result_content is not None else ""
+            )
+            if result_text:
+                content = result_text
             else:
                 content_parts = []
                 for msg in messages:
