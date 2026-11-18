@@ -283,6 +283,18 @@ BASH_TOOLS = frozenset({"Bash", "bash", "shell"})
 # control request -- leaving the checks below inert. See issue #219.
 GUARDED_TOOLS = FILE_TOOLS | BASH_TOOLS
 
+
+def _allow_rule_base_name(rule: str) -> str:
+    """Return the tool an allow rule names, without its scope.
+
+    Allow rules may use the CLI's scoped syntax -- ``Bash(git:*)``,
+    ``Read(//etc/**)`` -- where the tool name is the part before ``(`` and
+    the scope only narrows which calls the rule matches. Gating decisions
+    are per tool, so they compare this base name. See issue #244.
+    """
+    return rule.split("(", 1)[0].strip()
+
+
 # Keys under which the guarded file tools pass their target path.
 _FILE_PATH_KEYS = ("file_path", "path", "notebook_path")
 
@@ -489,10 +501,16 @@ class ClaudeSDKManager:
                 tools_to_strip = tools_to_strip | GUARDED_TOOLS
 
             if tools_to_strip:
-                gated = [t for t in sdk_allowed_tools if t in tools_to_strip]
+                gated = [
+                    t
+                    for t in sdk_allowed_tools
+                    if _allow_rule_base_name(t) in tools_to_strip
+                ]
                 if gated:
                     sdk_allowed_tools = [
-                        tool for tool in sdk_allowed_tools if tool not in tools_to_strip
+                        tool
+                        for tool in sdk_allowed_tools
+                        if _allow_rule_base_name(tool) not in tools_to_strip
                     ]
                     logger.debug(
                         "Routing guarded tools through can_use_tool",
